@@ -173,7 +173,9 @@ set -g status-interval 5
 bind-key a split-window -h -l 44 'attention-tui --passive'
 ```
 
-`--once` performs one poll and prints one block, which suits status scripts.
+`--once` performs one poll and prints one block, which suits status scripts. On
+a secondary instance it skips the poll: it prints `secondary: cache only` and
+renders whatever the primary last cached.
 
 ## Behaviour worth knowing
 

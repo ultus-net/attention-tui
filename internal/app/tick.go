@@ -30,7 +30,7 @@ const (
 
 // Source is the slice of the Graph client the runner needs. Tests fake it.
 type Source interface {
-	Chats(ctx context.Context, pageURL string) ([]graph.Chat, string, error)
+	Chats(ctx context.Context, pageURL string, expandMembers bool) ([]graph.Chat, string, error)
 	ChatMessages(ctx context.Context, chatID string, top int) ([]graph.Message, error)
 	ChatMemberNames(ctx context.Context, chatID string) ([]string, error)
 	MailDelta(ctx context.Context, pageURL string) (graph.MailDeltaResult, error)
@@ -160,7 +160,8 @@ func (r *Runner) tick(ctx context.Context) (TickResult, error) {
 		if err != nil {
 			return res, err
 		}
-		if !graph.IsUnread(ch, watermark, now) {
+		unread, known := graph.IsUnread(ch, watermark, now)
+		if !known || !unread {
 			continue
 		}
 		msgs, err := r.source.ChatMessages(ctx, ch.ID, chatMessageTop)
@@ -295,7 +296,7 @@ func (r *Runner) fetchChats(ctx context.Context) ([]graph.Chat, error) {
 	pageURL := ""
 	var chats []graph.Chat
 	for page := 0; page < chatsMaxPages; page++ {
-		batch, next, err := r.source.Chats(ctx, pageURL)
+		batch, next, err := r.source.Chats(ctx, pageURL, full)
 		if err != nil {
 			return nil, fmt.Errorf("app: list chats: %w", err)
 		}
@@ -367,9 +368,13 @@ func (r *Runner) chatName(ctx context.Context, ch graph.Chat) (string, error) {
 	if ok {
 		return cached, nil
 	}
-	names, err := r.source.ChatMemberNames(ctx, ch.ID)
-	if err != nil {
-		return "", fmt.Errorf("app: chat members %s: %w", ch.ID, err)
+	names := ch.Members
+	if len(names) == 0 {
+		var err error
+		names, err = r.source.ChatMemberNames(ctx, ch.ID)
+		if err != nil {
+			return "", fmt.Errorf("app: chat members %s: %w", ch.ID, err)
+		}
 	}
 	name := graph.ChatName(ch, names)
 	if name != "" {

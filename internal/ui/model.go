@@ -313,11 +313,27 @@ func (m Model) visibleRows() []Row {
 	return out
 }
 
+// rowMatches reports whether every rune of needle appears in the row text in
+// order. The match is fuzzy, so "anl" still finds "Ana Lima", but a rune
+// cannot move backwards. The needle is already lowercased.
 func rowMatches(row Row, needle string) bool {
+	if needle == "" {
+		return true
+	}
 	haystack := strings.ToLower(strings.Join([]string{
 		row.ChatName, row.Item.From, row.Item.Subject, row.Item.Preview,
 	}, " "))
-	return strings.Contains(haystack, needle)
+	want := []rune(needle)
+	at := 0
+	for _, r := range haystack {
+		if r == want[at] {
+			at++
+			if at == len(want) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (m Model) current() (Row, bool) {

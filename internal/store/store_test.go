@@ -2,7 +2,10 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -361,5 +364,40 @@ func TestChatName(t *testing.T) {
 	}
 	if !ok || name != "Ana, Ben" {
 		t.Fatalf("ChatName = %q, %v", name, ok)
+	}
+}
+
+func TestOpenStampsSchemaVersion(t *testing.T) {
+	s, _ := open(t)
+	var version int
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatalf("read user_version: %v", err)
+	}
+	if version != schemaVersion {
+		t.Fatalf("user_version = %d, want %d", version, schemaVersion)
+	}
+}
+
+func TestOpenRefusesNewerSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version=%d", schemaVersion+1)); err != nil {
+		db.Close()
+		t.Fatalf("set user_version: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	s, err := Open(path)
+	if err == nil {
+		s.Close()
+		t.Fatal("Open accepted a database written by a newer build")
+	}
+	if !strings.Contains(err.Error(), "newer") {
+		t.Fatalf("err = %v, want a newer-schema explanation", err)
 	}
 }

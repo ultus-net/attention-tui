@@ -60,6 +60,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	login := fs.Bool("login", false, "run the sign-in flow and exit")
 	once := fs.Bool("once", false, "poll once, render one block, exit")
 	passive := fs.Bool("passive", false, "render a fixed block on a loop")
+	themeFlag := fs.String("theme", "", "colour theme; overrides the config")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -84,6 +85,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if created {
 		fmt.Fprintf(stderr, "wrote a sample config to %s\n", path)
 	}
+	if err := applyThemeFlag(cfg, *themeFlag); err != nil {
+		fmt.Fprintf(stderr, "%v\n", err)
+		return 2
+	}
+	themeOverride := ""
+	if strings.TrimSpace(*themeFlag) != "" {
+		themeOverride = cfg.Theme
+	}
 
 	dataDir, err := config.DataDir()
 	if err != nil {
@@ -106,6 +115,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "rules: %v\n", err)
 		return 1
 	}
+	rt.themeOverride = themeOverride
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -299,6 +309,20 @@ func alertTitle(it rules.Item) string {
 	return name
 }
 
+// applyThemeFlag resolves an override into cfg. An empty name keeps the
+// configured theme.
+func applyThemeFlag(cfg *config.Config, name string) error {
+	if strings.TrimSpace(name) == "" {
+		return nil
+	}
+	canonical, ok := theme.Resolve(name)
+	if !ok {
+		return fmt.Errorf("theme %q is not one of %s", name, strings.Join(theme.Names(), ", "))
+	}
+	cfg.Theme = canonical
+	return nil
+}
+
 func bannerFor(err error) string {
 	if errors.Is(err, auth.ErrInteractionRequired) {
 		return "auth: sign-in required; run attention-tui --login"
@@ -459,11 +483,12 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 
 // runtime holds the config and compiled rules, and swaps both on SIGHUP.
 type appRuntime struct {
-	path   string
-	stderr io.Writer
-	mu     sync.RWMutex
-	cfg    *config.Config
-	engine *rules.Engine
+	path          string
+	stderr        io.Writer
+	themeOverride string
+	mu            sync.RWMutex
+	cfg           *config.Config
+	engine        *rules.Engine
 }
 
 func newRuntime(path string, cfg *config.Config, stderr io.Writer) (*appRuntime, error) {
@@ -496,6 +521,9 @@ func (r *appRuntime) reload() error {
 	cfg, _, err := config.Load(r.path)
 	if err != nil {
 		return fmt.Errorf("reload config: %w", err)
+	}
+	if r.themeOverride != "" {
+		cfg.Theme = r.themeOverride
 	}
 	engine, err := rules.New(cfg)
 	if err != nil {

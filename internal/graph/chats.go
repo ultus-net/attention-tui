@@ -24,6 +24,9 @@ type Chat struct {
 	WebURL        string
 	LastMessageAt time.Time
 	LastReadAt    time.Time
+	// Members carries expanded member display names with the signed-in user
+	// removed. It is empty when the walk did not ask for the expansion.
+	Members []string
 }
 
 // Message is one Teams chat message reduced to what the pane renders.
@@ -53,14 +56,26 @@ type chatJSON struct {
 	Viewpoint struct {
 		LastMessageRead string `json:"lastMessageReadDateTime"`
 	} `json:"viewpoint"`
+	Members []struct {
+		UserID      string `json:"userId"`
+		DisplayName string `json:"displayName"`
+	} `json:"members"`
 }
 
 // Chats lists chats newest-first. An empty URL starts at the first page.
-func (c *Client) Chats(ctx context.Context, pageURL string) ([]Chat, string, error) {
+// expandMembers asks for the member list in the same response. Graph caps that
+// expansion at 25 members with no continuation, so a larger group chat is
+// named from the first 25. The per-chat member call remains the fallback when
+// the expansion is absent.
+func (c *Client) Chats(ctx context.Context, pageURL string, expandMembers bool) ([]Chat, string, error) {
 	if strings.TrimSpace(pageURL) == "" {
 		query := url.Values{}
 		query.Set("$top", fmt.Sprint(chatsTop))
-		query.Set("$expand", "lastMessagePreview")
+		expand := "lastMessagePreview"
+		if expandMembers {
+			expand += ",members"
+		}
+		query.Set("$expand", expand)
 		query.Set("$orderby", "lastMessagePreview/createdDateTime desc")
 		pageURL = chatsPath + "?" + query.Encode()
 	}
@@ -69,14 +84,44 @@ func (c *Client) Chats(ctx context.Context, pageURL string) ([]Chat, string, err
 	if err := c.get(ctx, pageURL, &page); err != nil {
 		return nil, "", fmt.Errorf("graph: list chats: %w", err)
 	}
+
+	self := ""
+	if hasMembers(page.Value) {
+		// One /me call names every chat on the page. A failure fails the walk,
+		// because an unfiltered list would name the chat "you, Ana".
+		id, err := c.signedInUserID(ctx)
+		if err != nil {
+			return nil, "", fmt.Errorf("graph: list chats: %w", err)
+		}
+		self = id
+	}
+
 	chats := make([]Chat, 0, len(page.Value))
 	for _, raw := range page.Value {
-		chats = append(chats, raw.toChat())
+		chats = append(chats, raw.toChat(self))
 	}
 	return chats, page.NextLink, nil
 }
 
-func (c chatJSON) toChat() Chat {
+func hasMembers(chats []chatJSON) bool {
+	for _, ch := range chats {
+		if len(ch.Members) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (c chatJSON) toChat(self string) Chat {
+	members := make([]string, 0, len(c.Members))
+	for _, m := range c.Members {
+		if self != "" && m.UserID == self {
+			continue
+		}
+		if name := strings.TrimSpace(m.DisplayName); name != "" {
+			members = append(members, name)
+		}
+	}
 	return Chat{
 		ID:            c.ID,
 		Topic:         strings.TrimSpace(c.Topic),
@@ -84,22 +129,28 @@ func (c chatJSON) toChat() Chat {
 		WebURL:        c.WebURL,
 		LastMessageAt: parseGraphTime(c.LastMessagePreview.Created),
 		LastReadAt:    parseGraphTime(c.Viewpoint.LastMessageRead),
+		Members:       members,
 	}
 }
 
-// IsUnread reports whether the newest preview is past the read point. The
-// local watermark wins over the server field, and a preview far in the future
-// is clamped to now so clock skew cannot pin a chat to unread forever.
-func IsUnread(ch Chat, watermark, now time.Time) bool {
+// IsUnread reports whether the newest preview is past the read point, and
+// whether that can be known at all. A chat with no preview has no message to
+// compare, so the caller must skip it rather than call it read. The local
+// watermark wins over the server field, and a preview far in the future is
+// clamped to now so clock skew cannot pin a chat to unread forever.
+func IsUnread(ch Chat, watermark, now time.Time) (unread, known bool) {
+	preview := ch.LastMessageAt
+	if preview.IsZero() {
+		return false, false
+	}
+	if preview.After(now.Add(futureClamp)) {
+		preview = now
+	}
 	read := ch.LastReadAt
 	if watermark.After(read) {
 		read = watermark
 	}
-	preview := ch.LastMessageAt
-	if preview.After(now.Add(futureClamp)) {
-		preview = now
-	}
-	return preview.After(read)
+	return preview.After(read), true
 }
 
 // ChatMessages fetches the newest messages of one chat. top is clamped to

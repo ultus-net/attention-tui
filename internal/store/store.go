@@ -14,6 +14,11 @@ import (
 	"github.com/ultus-net/attention-tui/internal/rules"
 )
 
+// schemaVersion is bumped whenever schema changes in a way an older binary
+// cannot read. Open refuses a database newer than this build, so a downgrade
+// fails loudly instead of corrupting rows.
+const schemaVersion = 1
+
 const schema = `
 CREATE TABLE IF NOT EXISTS items (
   source      TEXT    NOT NULL,
@@ -74,9 +79,28 @@ func Open(path string) (*Store, error) {
 			return nil, fmt.Errorf("store: %s: %w", pragma, err)
 		}
 	}
+	var version int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("store: read schema version: %w", err)
+	}
+	if version > schemaVersion {
+		db.Close()
+		return nil, fmt.Errorf(
+			"store: %s was written by a newer attention-tui (schema %d, this build reads %d); upgrade or move it aside",
+			path, version, schemaVersion,
+		)
+	}
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("store: create schema: %w", err)
+	}
+	if version < schemaVersion {
+		// PRAGMA does not accept a bind parameter; the value is a constant.
+		if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version=%d", schemaVersion)); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("store: set schema version: %w", err)
+		}
 	}
 	return &Store{db: db}, nil
 }

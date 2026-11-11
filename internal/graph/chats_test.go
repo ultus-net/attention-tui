@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -31,7 +32,7 @@ func TestChatsParsesPreviewAndReadTime(t *testing.T) {
 	srv := jsonServer(t, body)
 	c := New(srv.URL, &fakeTokens{})
 
-	chats, next, err := c.Chats(context.Background(), "")
+	chats, next, err := c.Chats(context.Background(), "", false)
 	if err != nil {
 		t.Fatalf("Chats: %v", err)
 	}
@@ -58,7 +59,7 @@ func TestChatsReturnsNextLink(t *testing.T) {
 	srv := jsonServer(t, body)
 	c := New(srv.URL, &fakeTokens{})
 
-	_, next, err := c.Chats(context.Background(), "")
+	_, next, err := c.Chats(context.Background(), "", false)
 	if err != nil {
 		t.Fatalf("Chats: %v", err)
 	}
@@ -67,17 +68,88 @@ func TestChatsReturnsNextLink(t *testing.T) {
 	}
 }
 
+func TestChatsExpandsMembersAndDropsSelf(t *testing.T) {
+	var rawQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/me":
+			w.Write([]byte(`{"id":"self-id","displayName":"Me"}`))
+		case "/me/chats":
+			rawQuery = r.URL.RawQuery
+			w.Write([]byte(`{"value":[{
+				"id": "19:one",
+				"chatType": "oneOnOne",
+				"members": [
+					{"userId": "self-id", "displayName": "Me"},
+					{"userId": "ana-id", "displayName": "Ana"},
+					{"userId": "blank-id", "displayName": ""}
+				]
+			}]}`))
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	c := New(srv.URL, &fakeTokens{})
+
+	chats, _, err := c.Chats(context.Background(), "", true)
+	if err != nil {
+		t.Fatalf("Chats: %v", err)
+	}
+	query, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		t.Fatalf("parse query: %v", err)
+	}
+	if got := query.Get("$expand"); got != "lastMessagePreview,members" {
+		t.Fatalf("$expand = %q, want the member expansion", got)
+	}
+	if len(chats) != 1 || len(chats[0].Members) != 1 || chats[0].Members[0] != "Ana" {
+		t.Fatalf("members = %+v, want Ana and no self or blank", chats)
+	}
+}
+
+func TestChatsWithoutExpandOmitsMembers(t *testing.T) {
+	var rawQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rawQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"value": []}`))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, &fakeTokens{})
+
+	if _, _, err := c.Chats(context.Background(), "", false); err != nil {
+		t.Fatalf("Chats: %v", err)
+	}
+	query, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		t.Fatalf("parse query: %v", err)
+	}
+	if got := query.Get("$expand"); got != "lastMessagePreview" {
+		t.Fatalf("$expand = %q, want the preview only", got)
+	}
+}
+
 func TestIsUnreadComparesPreviewToRead(t *testing.T) {
 	preview := time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC)
 	read := time.Date(2026, 1, 2, 9, 0, 0, 0, time.UTC)
 	now := time.Date(2026, 1, 2, 11, 0, 0, 0, time.UTC)
 	ch := Chat{LastMessageAt: preview, LastReadAt: read}
-	if !IsUnread(ch, time.Time{}, now) {
+	if unread, known := IsUnread(ch, time.Time{}, now); !known || !unread {
 		t.Fatal("a message newer than the read time is unread")
 	}
 	ch.LastReadAt = time.Date(2026, 1, 2, 10, 5, 0, 0, time.UTC)
-	if IsUnread(ch, time.Time{}, now) {
+	if unread, known := IsUnread(ch, time.Time{}, now); !known || unread {
 		t.Fatal("a message older than the read time is read")
+	}
+}
+
+func TestIsUnreadUnknownWithoutPreview(t *testing.T) {
+	now := time.Date(2026, 1, 2, 11, 0, 0, 0, time.UTC)
+	ch := Chat{LastReadAt: now.Add(-time.Hour)}
+	if unread, known := IsUnread(ch, time.Time{}, now); known || unread {
+		t.Fatal("a chat with no preview has no readable state and must be skipped")
 	}
 }
 
@@ -87,7 +159,7 @@ func TestLocalWatermarkSuppressesFuturePreview(t *testing.T) {
 		LastMessageAt: now.Add(2 * time.Hour),
 		LastReadAt:    time.Date(2026, 1, 2, 9, 0, 0, 0, time.UTC),
 	}
-	if IsUnread(ch, now, now) {
+	if unread, known := IsUnread(ch, now, now); !known || unread {
 		t.Fatal("clock-skewed future preview must not pin the chat to unread")
 	}
 }

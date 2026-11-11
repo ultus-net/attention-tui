@@ -210,6 +210,29 @@ func TestFilterNarrowsRows(t *testing.T) {
 	}
 }
 
+func TestBenchFilterUsesFuzzyOrder(t *testing.T) {
+	row := Row{Item: rules.Item{From: "Ana Lima", Subject: "budget"}}
+	for _, filter := range []string{"anl", "ana bud", "alima"} {
+		if !rowMatches(row, filter) {
+			t.Fatalf("filter %q did not match in order", filter)
+		}
+	}
+	for _, filter := range []string{"lima ana", "zzz"} {
+		if rowMatches(row, filter) {
+			t.Fatalf("filter %q matched out of order or absent", filter)
+		}
+	}
+}
+
+func TestFilterNarrowsRowsFuzzy(t *testing.T) {
+	d, _, _ := testDeps(t, mailItem("m1", "Ana Lima", "budget"), mailItem("m2", "Ben", "invoice"))
+	m := New(d)
+	m.filter = "anl"
+	if rows := m.visibleRows(); len(rows) != 1 {
+		t.Fatalf("filtered rows = %d, want Anna's in-order match", len(rows))
+	}
+}
+
 // Terminals disagree on what they send for the backspace key: 127, ctrl+h, or
 // the delete escape sequence. All three must edit the prompt.
 var backspaceVariants = []tea.KeyType{tea.KeyBackspace, tea.KeyCtrlH, tea.KeyDelete}

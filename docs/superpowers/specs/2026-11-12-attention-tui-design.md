@@ -122,6 +122,20 @@ One flow, two modes. Authorization code with PKCE against
 Scopes: `offline_access Chat.Read Chat.ReadWrite ChatMessage.Send Mail.Read
 User.Read`.
 
+App registration lives in config, so nothing tenant-specific is committed:
+
+```yaml
+auth:
+  client_id: "00000000-0000-0000-0000-000000000000"
+  tenant: organizations
+  mode: public
+  redirect_port: 53147
+```
+
+`tenant` defaults to `organizations`, not `common`, because Teams chat
+permissions reject personal Microsoft accounts. `ATTENTION_TUI_CLIENT_ID` and
+`ATTENTION_TUI_TENANT` override the file for one-off runs.
+
 Token storage: OS keyring first, `$XDG_DATA_HOME/attention-tui/token.json` at
 0600 as fallback for machines without a session bus. The rotated refresh token
 is written before the new access token is used, so a crash mid-refresh cannot
@@ -138,13 +152,21 @@ line: `auth: no token - run attention-tui --login`. The process keeps running.
 One tick every `poll_interval` (default 60s, floor 30s, 10 percent jitter).
 
 1. Mail: redeem the stored delta link. New and changed messages upsert into
-   the cache. On `410 Gone` or an expired delta token, restart the delta from
-   the inbox root and set a backfilling flag.
+   the cache. On `410 Gone`, or when the store has no delta link, walk the
+   inbox delta from the root, paging until Graph returns a link, and set
+   `backfill=1` for that tick. The walk stops inserting after 7 days or 200
+   messages, whichever comes first.
 2. Chats: one list call with `$expand=lastMessagePreview`. A chat is unread
    when `lastMessagePreview.createdDateTime > viewpoint.lastMessageReadDateTime`.
    For unread chats only, fetch the newest 10 messages and upsert them.
-3. Rules run over new items, assigning a tier. Notifications fire once per
-   tick, coalesced, and only for tier `alert`.
+   The first tick of a process pages the full chat list. Later ticks read the
+   first page (50 chats, newest activity first) and a full page-walk repeats
+   every 30 ticks, so an unread chat outside the newest 50 is found within
+   half an hour without paying for it every minute.
+3. Rules run over cached items. Notifications fire once per tick, coalesced,
+   and only for a row that is tier `alert`, has `notified_at` null, and was
+   first seen within two poll intervals. That last condition is what stops a
+   rule edit, a restart, or a backfill from announcing history.
 4. Sleep until the next tick.
 
 Failures never terminate the loop.
@@ -204,13 +226,33 @@ rules and pressing `R` reclassifies the existing list with no refetch.
 
 Regexes are compiled at load. A bad pattern is a startup error naming the rule.
 
+### Attention model
+
+One row per thing, not per message. A chat with twenty new messages is one
+interruption, so a chat collapses to one row showing its newest unread message:
+sender, preview, and whether any of the ten fetched messages mentions the user.
+Mail is one row per message, because each has its own subject and sender.
+
+The header count is unseen rows at tier `watch` or `alert`. A chat with nothing
+unread leaves the list. Mail leaves the list when marked seen locally, or when
+the delta reports `isRead: true`.
+
+`seen` is local and never written back to Graph. Opening a chat row clears that
+row only. It does not mark the conversation read in Teams.
+
+Chat name, used by `chat` globs and the row label, is `topic` when Graph
+supplies one. Otherwise it is the other participants' display names from
+`GET /me/chats/{id}/members`, fetched once per chat and cached, which covers 1:1
+chats that carry no topic. Members are not expanded on the list call, because
+Graph may truncate that relationship there.
+
 ### Store
 
 SQLite through `modernc.org/sqlite`, same as `rss-tui`, no cgo.
 
 - `items(source, id, chat_id, sender, subject, preview, received_at, url,
-  importance, focused, flagged, mention, raw_json, first_seen)`, primary key
-  `(source, id)`.
+  importance, focused, flagged, mention, seen, notified_at, raw_json,
+  first_seen)`, primary key `(source, id)`.
 - `chats(chat_id, name, last_message_at, last_read_at, web_url)`.
 - `kv(key, value)` for the mail delta link, schema version, and backfill flag.
 
@@ -258,6 +300,11 @@ silent.
 - `--passive` runs the loop in the ticker view.
 - Default runs the interactive view.
 - `SIGHUP` reloads config and rules without restarting.
+- The first instance takes an `flock` on the state database and owns polling,
+  the delta link, and notifications. A second instance on the same database
+  renders the cache read-only and shows `secondary: cache only` in its header.
+  That is what makes a passive pane and an interactive view safe to run at the
+  same time.
 
 ## Testing
 
@@ -270,7 +317,12 @@ silent.
   `Retry-After`, 401 then refresh then retry, and delta `410` restart. Fixtures
   are trimmed real payloads with their source noted beside the test.
 - `internal/store`: upsert idempotence, retention pruning, delta-link
-  round-trip.
+  round-trip, seen toggling, and the notification-eligibility query (alert,
+  unnotified, first seen within the window).
+- Backfill: a `410` followed by a root walk inserts at most the bounded window
+  and fires no notification for the history it imports.
+- Single instance: a second reader opens the same database, polls nothing, and
+  leaves the delta link untouched.
 - `internal/ui`: passive renderer golden test at 40 and 100 columns; interactive
   model transitions without a terminal.
 

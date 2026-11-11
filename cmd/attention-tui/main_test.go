@@ -29,7 +29,7 @@ func (f *fakeSource) MailDelta(ctx context.Context, url string) (graph.MailDelta
 	return f.delta, nil
 }
 
-func (f *fakeSource) Chats(ctx context.Context, url string) ([]graph.Chat, string, error) {
+func (f *fakeSource) Chats(ctx context.Context, url string, expand bool) ([]graph.Chat, string, error) {
 	return nil, "", nil
 }
 
@@ -88,6 +88,37 @@ func TestMissingConfigCreatesSample(t *testing.T) {
 	}
 	if code == 2 {
 		t.Fatalf("run treated the first-run config as a usage error: %s", errOut.String())
+	}
+}
+
+func TestThemeFlagRejectsUnknown(t *testing.T) {
+	cfgPath, _ := setup(t)
+	var out, errOut bytes.Buffer
+	if code := run([]string{"--config", cfgPath, "--once", "--theme", "nope"}, &out, &errOut); code != 2 {
+		t.Fatalf("code = %d, want 2 for an unknown theme", code)
+	}
+	if !strings.Contains(errOut.String(), "not one of") {
+		t.Fatalf("stderr = %q, want the known theme list", errOut.String())
+	}
+}
+
+func TestThemeFlagOverridesConfig(t *testing.T) {
+	cfgPath, _ := setup(t)
+	cfg, _, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if err := applyThemeFlag(cfg, " Gruvbox "); err != nil {
+		t.Fatalf("applyThemeFlag: %v", err)
+	}
+	if cfg.Theme != "gruvbox-dark" {
+		t.Fatalf("theme = %q, want the canonical alias", cfg.Theme)
+	}
+	if err := applyThemeFlag(cfg, ""); err != nil {
+		t.Fatalf("applyThemeFlag(empty): %v", err)
+	}
+	if cfg.Theme != "gruvbox-dark" {
+		t.Fatalf("an empty override replaced the theme with %q", cfg.Theme)
 	}
 }
 

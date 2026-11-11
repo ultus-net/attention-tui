@@ -34,13 +34,14 @@ func testConfig(t *testing.T) *config.Config {
 func boolPtr(b bool) *bool { return &b }
 
 type fakeSource struct {
-	mailFn    func(ctx context.Context, url string) (graph.MailDeltaResult, error)
-	chatsFn   func(ctx context.Context, url string) ([]graph.Chat, string, error)
-	messages  map[string][]graph.Message
-	members   map[string][]string
-	mailCalls int
-	chatCalls int
-	page2Hits int
+	mailFn      func(ctx context.Context, url string) (graph.MailDeltaResult, error)
+	chatsFn     func(ctx context.Context, url string, expand bool) ([]graph.Chat, string, error)
+	messages    map[string][]graph.Message
+	members     map[string][]string
+	mailCalls   int
+	chatCalls   int
+	memberCalls int
+	page2Hits   int
 }
 
 func (f *fakeSource) MailDelta(ctx context.Context, url string) (graph.MailDeltaResult, error) {
@@ -54,13 +55,13 @@ func (f *fakeSource) MailDelta(ctx context.Context, url string) (graph.MailDelta
 	return graph.MailDeltaResult{DeltaLink: url}, nil
 }
 
-func (f *fakeSource) Chats(ctx context.Context, url string) ([]graph.Chat, string, error) {
+func (f *fakeSource) Chats(ctx context.Context, url string, expand bool) ([]graph.Chat, string, error) {
 	f.chatCalls++
 	if url == "page2" {
 		f.page2Hits++
 	}
 	if f.chatsFn != nil {
-		return f.chatsFn(ctx, url)
+		return f.chatsFn(ctx, url, expand)
 	}
 	return nil, "", nil
 }
@@ -70,6 +71,7 @@ func (f *fakeSource) ChatMessages(ctx context.Context, chatID string, top int) (
 }
 
 func (f *fakeSource) ChatMemberNames(ctx context.Context, chatID string) ([]string, error) {
+	f.memberCalls++
 	return f.members[chatID], nil
 }
 
@@ -106,7 +108,7 @@ func TestTickFetchesMailAndChats(t *testing.T) {
 				DeltaLink: "delta-1",
 			}, nil
 		},
-		chatsFn: func(context.Context, string) ([]graph.Chat, string, error) {
+		chatsFn: func(context.Context, string, bool) ([]graph.Chat, string, error) {
 			return []graph.Chat{unreadChat()}, "", nil
 		},
 		messages: map[string][]graph.Message{
@@ -146,7 +148,7 @@ func TestDeltaLinkNotSavedWhenTickFails(t *testing.T) {
 				DeltaLink: "delta-1",
 			}, nil
 		},
-		chatsFn: func(context.Context, string) ([]graph.Chat, string, error) {
+		chatsFn: func(context.Context, string, bool) ([]graph.Chat, string, error) {
 			return nil, "", errors.New("chats down")
 		},
 	}
@@ -211,7 +213,7 @@ func TestChatCollapsesToOneItem(t *testing.T) {
 		})
 	}
 	src := &fakeSource{
-		chatsFn: func(context.Context, string) ([]graph.Chat, string, error) {
+		chatsFn: func(context.Context, string, bool) ([]graph.Chat, string, error) {
 			return []graph.Chat{unreadChat()}, "", nil
 		},
 		messages: map[string][]graph.Message{"19:abc": msgs},
@@ -233,6 +235,63 @@ func TestChatCollapsesToOneItem(t *testing.T) {
 	}
 	if items[0].Source != "chat" || items[0].ChatName != "Deploy Bot" {
 		t.Fatalf("item = %+v", items[0])
+	}
+}
+
+func TestFullWalkNamesChatFromExpandedMembers(t *testing.T) {
+	ch := unreadChat()
+	ch.Topic = ""
+	ch.Members = []string{"Ana"}
+	now := time.Now()
+	src := &fakeSource{
+		chatsFn: func(_ context.Context, _ string, expand bool) ([]graph.Chat, string, error) {
+			if !expand {
+				t.Fatal("the first tick is a full walk and must expand members")
+			}
+			return []graph.Chat{ch}, "", nil
+		},
+		messages: map[string][]graph.Message{
+			"19:abc": {{ID: "msg1", ChatID: "19:abc", Sender: "Ana", Body: "hi", Created: now}},
+		},
+	}
+	r, st := newRunner(t, testConfig(t), src)
+
+	if _, err := r.Tick(context.Background()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	items, err := st.Items(context.Background())
+	if err != nil {
+		t.Fatalf("Items: %v", err)
+	}
+	if len(items) != 1 || items[0].ChatName != "Ana" {
+		t.Fatalf("items = %+v, want the expanded member name", items)
+	}
+	if src.memberCalls != 0 {
+		t.Fatalf("per-chat member calls = %d, want 0 on an expanded walk", src.memberCalls)
+	}
+}
+
+func TestChatWithoutPreviewIsSkipped(t *testing.T) {
+	src := &fakeSource{
+		chatsFn: func(context.Context, string, bool) ([]graph.Chat, string, error) {
+			return []graph.Chat{{ID: "19:empty", WebURL: "https://teams.example/19:empty"}}, "", nil
+		},
+	}
+	r, st := newRunner(t, testConfig(t), src)
+
+	res, err := r.Tick(context.Background())
+	if err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if res.NewChats != 0 {
+		t.Fatalf("new chats = %d, want 0 for a chat with no preview", res.NewChats)
+	}
+	items, err := st.Items(context.Background())
+	if err != nil {
+		t.Fatalf("Items: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("items = %+v, want the preview-less chat skipped", items)
 	}
 }
 
@@ -319,7 +378,7 @@ func TestBackfillIsBounded(t *testing.T) {
 
 func TestFirstTickPagesChats(t *testing.T) {
 	src := &fakeSource{
-		chatsFn: func(_ context.Context, url string) ([]graph.Chat, string, error) {
+		chatsFn: func(_ context.Context, url string, _ bool) ([]graph.Chat, string, error) {
 			if url == "" {
 				return nil, "page2", nil
 			}
@@ -387,7 +446,7 @@ func TestBackoffGrows(t *testing.T) {
 func TestChatMentionOnlyCountsUnreadMessages(t *testing.T) {
 	now := time.Now()
 	src := &fakeSource{
-		chatsFn: func(context.Context, string) ([]graph.Chat, string, error) {
+		chatsFn: func(context.Context, string, bool) ([]graph.Chat, string, error) {
 			return []graph.Chat{unreadChat()}, "", nil
 		},
 		messages: map[string][]graph.Message{"19:abc": {

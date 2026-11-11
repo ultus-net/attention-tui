@@ -40,6 +40,18 @@ Keep a Changelog, and the project adheres to Semantic Versioning.
   challenge into the sign-in URL.
 - Sample config written on first run, six shared palettes, README with app
   registration steps, and a Makefile.
+- The SQLite cache records `PRAGMA user_version`. A database written by a newer
+  build is refused with an explanation instead of being read as if it were this
+  schema.
+- The pane filter matches characters in order, so `anl` finds `Ana Lima`. It
+  still ignores case and does not match a rune out of order.
+- `--theme NAME` overrides the configured palette, accepts the same aliases as
+  the config, and is reapplied after a `SIGHUP` reload.
+- A full chat walk asks for `$expand=lastMessagePreview,members`, so most chats
+  are named without a per-chat member call. The per-chat call stays as the
+  fallback when the expansion is absent.
+- A chat with no last-message preview is skipped rather than treated as read.
+  The read state is unknown, not false.
 
 ### Fixed
 

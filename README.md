@@ -57,6 +57,7 @@ Flags:
 | `--login` | Run the browser sign-in flow and exit |
 | `--once` | Poll once, render one block, exit |
 | `--passive` | Render a fixed-height block on a loop |
+| `--theme NAME` | Override the configured palette |
 | `--version` | Print the version |
 
 `SIGHUP` reloads the config and rebuilds the rule engine. A second instance
@@ -158,7 +159,7 @@ everything.
 | `enter` | Open the row and mark it seen locally |
 | `a` | Show or hide quiet rows |
 | `r` | Reply to the selected chat |
-| `/` | Filter by name, sender, subject, or preview |
+| `/` | Filter by name, sender, subject, or preview, in order |
 | `R` | Reload the cache |
 | `q` | Quit |
 
@@ -167,8 +168,8 @@ everything.
 `--passive` renders a fixed-height block sized from the terminal, falling back
 to `COLUMNS` and `LINES`, so it can sit in a tmux pane. It redraws the block in
 place instead of clearing the screen. A piped `--passive` prints one plain
-block and exits, which suits status scripts. Colours come from `theme`;
-`NO_COLOR` or `TERM=dumb` disables them.
+block and exits, which suits status scripts. Colours come from `theme` or
+`--theme`; `NO_COLOR` or `TERM=dumb` disables them.
 
 ```tmux
 # ~/.tmux.conf
@@ -189,6 +190,12 @@ renders whatever the primary last cached.
 - A notification fires only for an alert-tier row first seen within two poll
   intervals that has never notified.
 - Graph is polled: `$top` is capped at 50 for chats and mail, 10 for messages.
+  A full chat walk (first tick, then every 30th) expands members; other walks
+  take the first page and use cached names.
+- A chat with no last-message preview is skipped. Its read state is unknown,
+  not false.
+- The cache carries `PRAGMA user_version`. A database from a newer build is
+  refused with an explanation rather than read as this schema.
 - Tokens live in `$XDG_DATA_HOME/attention-tui/token.json` with mode 0600. A
   rotated refresh token is persisted before the new access token is used.
 - A network or auth failure prints a one-line banner and keeps the process
@@ -200,3 +207,6 @@ renders whatever the primary last cached.
 Deliberately absent: channels and channel mentions, calendar, attachments,
 mail compose, Teams file access, webhooks, and any server-side read marking.
 Notifications are one coalesced message per poll, not one per item.
+
+The chat member expansion returns at most 25 members and has no continuation.
+A group chat with more than 25 members is named from those 25.

@@ -24,3 +24,12 @@ func TestUnknownPaletteFallsBack(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveAlias(t *testing.T) {
+	if got, ok := Resolve(" Gruvbox "); !ok || got != "gruvbox-dark" {
+		t.Fatalf("Resolve(gruvbox) = %q, %v", got, ok)
+	}
+	if _, ok := Resolve("nope"); ok {
+		t.Fatal("Resolve accepted an unknown palette")
+	}
+}

@@ -72,10 +72,17 @@ var aliases = map[string]string{
 	"solarized-dark":   "solarized-dark",
 }
 
+// Resolve returns the canonical palette name for name. The second result is
+// false when name is not a known palette or alias.
+func Resolve(name string) (string, bool) {
+	key := strings.ToLower(strings.TrimSpace(name))
+	canonical, ok := aliases[key]
+	return canonical, ok
+}
+
 // Get resolves name, falling back to the default for unknown values.
 func Get(name string) Palette {
-	key := strings.ToLower(strings.TrimSpace(name))
-	if canonical, ok := aliases[key]; ok {
+	if canonical, ok := Resolve(name); ok {
 		return palettes[canonical]
 	}
 	return palettes[DefaultName]

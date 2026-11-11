@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type fakeTokens struct {
@@ -156,5 +157,47 @@ func TestContextCancelledStopsRetry(t *testing.T) {
 	}
 	if got := requests.Load(); got != 0 {
 		t.Fatalf("requests = %d, want 0", got)
+	}
+}
+
+func TestRetryAfterHTTPDate(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			past := time.Now().Add(-time.Minute).UTC().Format(http.TimeFormat)
+			w.Header().Set("Retry-After", past)
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, &fakeTokens{})
+	if err := c.get(context.Background(), "me/test", nil); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("requests = %d, want 2", got)
+	}
+}
+
+func TestRetryBudgetExhausted(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":{"code":"InternalServerError","message":"boom"}}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, &fakeTokens{})
+	err := c.get(context.Background(), "me/test", nil)
+	if err == nil {
+		t.Fatal("expected the exhausted retry budget to return an error")
+	}
+	if got := requests.Load(); got != 3 {
+		t.Fatalf("requests = %d, want the initial call plus two retries", got)
 	}
 }

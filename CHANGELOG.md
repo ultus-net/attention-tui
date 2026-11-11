@@ -29,3 +29,14 @@ Keep a Changelog, and the project adheres to Semantic Versioning.
   exits on them.
 - Sample config written on first run, six shared palettes, README with app
   registration steps, and a Makefile.
+
+### Fixed
+
+Review-round corrections before the first release:
+
+- Notification stamping applies only to alert-tier rows; rows the rules keep
+  quiet stay unstamped.
+- The mail delta link advances only after a tick commits, so a failed tick
+  replays the delta instead of skipping mail.
+- A newer message on a chat re-arms its row, clearing seen and notified state.
+- The filter and reply prompts accept every backspace key a terminal may send.

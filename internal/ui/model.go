@@ -30,6 +30,9 @@ type Deps struct {
 	Open   func(string) error
 	Send   func(ctx context.Context, chatID, text string) error
 	Banner string
+	// EngineFunc lets the process swap in a rebuilt rules engine on SIGHUP.
+	// When nil, Engine is used.
+	EngineFunc func() *rules.Engine
 }
 
 // Model is the Bubble Tea model for the interactive pane.
@@ -54,6 +57,12 @@ type Model struct {
 type tickMsg struct{}
 type reloadMsg struct{}
 type sendErrMsg struct{ err error }
+
+// BannerMsg replaces the banner line from outside the model.
+type BannerMsg struct{ Text string }
+
+// RefreshMsg asks the model to reload rows from the cache.
+type RefreshMsg struct{}
 
 // New builds a model and loads the current cache.
 func New(d Deps) Model {
@@ -96,6 +105,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case sendErrMsg:
 		m.err = msg.err.Error()
+		return m, nil
+	case BannerMsg:
+		m.banner = msg.Text
+		return m, nil
+	case RefreshMsg:
+		m.reload()
 		return m, nil
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -218,7 +233,11 @@ func (m *Model) openCurrent() {
 
 func (m *Model) reload() {
 	m.err = ""
-	if m.deps.Store == nil || m.deps.Engine == nil {
+	engine := m.deps.Engine
+	if m.deps.EngineFunc != nil {
+		engine = m.deps.EngineFunc()
+	}
+	if m.deps.Store == nil || engine == nil {
 		m.rows = nil
 		return
 	}
@@ -233,7 +252,7 @@ func (m *Model) reload() {
 		if name == "" {
 			name = it.From
 		}
-		rows = append(rows, Row{Item: it, Verdict: m.deps.Engine.Eval(it), ChatName: name})
+		rows = append(rows, Row{Item: it, Verdict: engine.Eval(it), ChatName: name})
 	}
 	m.rows = rows
 	m.clampCursor()

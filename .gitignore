@@ -1,4 +1,4 @@
-attention-tui
+/attention-tui
 *.db
 *.db-wal
 *.db-shm

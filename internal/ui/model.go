@@ -1,0 +1,349 @@
+// Package ui renders the attention pane, interactively or as a fixed block.
+package ui
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/ultus-net/attention-tui/internal/config"
+	"github.com/ultus-net/attention-tui/internal/rules"
+	"github.com/ultus-net/attention-tui/internal/store"
+)
+
+// Row is one rendered item with the tier it landed in.
+type Row struct {
+	Item     rules.Item
+	Verdict  rules.Verdict
+	ChatName string
+}
+
+// Deps is everything the model needs. Store and Engine are shared with the
+// poll loop; nothing here writes to Graph read state.
+type Deps struct {
+	Store  *store.Store
+	Engine *rules.Engine
+	Cfg    *config.Config
+	Open   func(string) error
+	Send   func(ctx context.Context, chatID, text string) error
+	Banner string
+}
+
+// Model is the Bubble Tea model for the interactive pane.
+type Model struct {
+	deps Deps
+
+	rows      []Row
+	cursor    int
+	banner    string
+	err       string
+	showQuiet bool
+
+	filtering bool
+	filter    string
+
+	composer     bool
+	composerText string
+
+	width int
+}
+
+type tickMsg struct{}
+type reloadMsg struct{}
+type sendErrMsg struct{ err error }
+
+// New builds a model and loads the current cache.
+func New(d Deps) Model {
+	m := Model{deps: d, banner: d.Banner, width: 80}
+	m.reload()
+	return m
+}
+
+// SetBanner replaces the banner line, e.g. "auth: no token".
+func (m *Model) SetBanner(text string) {
+	m.banner = text
+}
+
+// Init starts the reload ticker.
+func (m Model) Init() tea.Cmd {
+	return m.tickCmd()
+}
+
+func (m Model) tickCmd() tea.Cmd {
+	interval := 60 * time.Second
+	if m.deps.Cfg != nil && m.deps.Cfg.PollInterval.Std() > 0 {
+		interval = m.deps.Cfg.PollInterval.Std()
+	}
+	return tea.Tick(interval, func(time.Time) tea.Msg { return tickMsg{} })
+}
+
+// Update handles keys, resize and reloads.
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		if msg.Width > 0 {
+			m.width = msg.Width
+		}
+		return m, nil
+	case tickMsg:
+		m.reload()
+		return m, m.tickCmd()
+	case reloadMsg:
+		m.reload()
+		return m, nil
+	case sendErrMsg:
+		m.err = msg.err.Error()
+		return m, nil
+	case tea.KeyMsg:
+		return m.handleKey(msg)
+	}
+	return m, nil
+}
+
+func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.composer {
+		return m.handleComposer(msg)
+	}
+	if m.filtering {
+		return m.handleFilter(msg)
+	}
+
+	switch msg.String() {
+	case "j", "down":
+		if m.cursor < len(m.visibleRows())-1 {
+			m.cursor++
+		}
+	case "k", "up":
+		if m.cursor > 0 {
+			m.cursor--
+		}
+	case "enter":
+		m.openCurrent()
+	case "a":
+		m.showQuiet = !m.showQuiet
+		m.clampCursor()
+	case "r":
+		if row, ok := m.current(); ok && row.Item.Source == "chat" && m.deps.Send != nil {
+			m.composer = true
+			m.composerText = ""
+		}
+	case "/":
+		m.filtering = true
+		m.filter = ""
+		m.cursor = 0
+	case "R":
+		m.reload()
+	case "q", "ctrl+c":
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+func (m Model) handleFilter(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.filtering = false
+		m.filter = ""
+	case tea.KeyEnter:
+		m.filtering = false
+	case tea.KeyBackspace:
+		if r := []rune(m.filter); len(r) > 0 {
+			m.filter = string(r[:len(r)-1])
+		}
+	default:
+		m.filter += string(msg.Runes)
+	}
+	m.clampCursor()
+	return m, nil
+}
+
+func (m Model) handleComposer(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.composer = false
+		m.composerText = ""
+	case tea.KeyBackspace:
+		if r := []rune(m.composerText); len(r) > 0 {
+			m.composerText = string(r[:len(r)-1])
+		}
+	case tea.KeyEnter:
+		row, ok := m.current()
+		if !ok || m.deps.Send == nil {
+			m.composer = false
+			return m, nil
+		}
+		text := strings.TrimSpace(m.composerText)
+		if text == "" {
+			m.composer = false
+			return m, nil
+		}
+		chatID := row.Item.ChatID
+		send := m.deps.Send
+		m.composer = false
+		m.composerText = ""
+		return m, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			if err := send(ctx, chatID, text); err != nil {
+				return sendErrMsg{err: err}
+			}
+			return reloadMsg{}
+		}
+	default:
+		m.composerText += string(msg.Runes)
+	}
+	return m, nil
+}
+
+func (m *Model) openCurrent() {
+	row, ok := m.current()
+	if !ok {
+		return
+	}
+	if m.deps.Open != nil {
+		if err := m.deps.Open(row.Item.URL); err != nil {
+			m.err = err.Error()
+		}
+	}
+	if m.deps.Store != nil {
+		if err := m.deps.Store.SetSeen(context.Background(), row.Item.Source, row.Item.ID); err != nil {
+			m.err = err.Error()
+		}
+	}
+	m.reload()
+}
+
+func (m *Model) reload() {
+	m.err = ""
+	if m.deps.Store == nil || m.deps.Engine == nil {
+		m.rows = nil
+		return
+	}
+	items, err := m.deps.Store.Items(context.Background())
+	if err != nil {
+		m.err = err.Error()
+		return
+	}
+	rows := make([]Row, 0, len(items))
+	for _, it := range items {
+		name := it.ChatName
+		if name == "" {
+			name = it.From
+		}
+		rows = append(rows, Row{Item: it, Verdict: m.deps.Engine.Eval(it), ChatName: name})
+	}
+	m.rows = rows
+	m.clampCursor()
+}
+
+func (m *Model) clampCursor() {
+	n := len(m.visibleRows())
+	if n == 0 {
+		m.cursor = 0
+		return
+	}
+	if m.cursor >= n {
+		m.cursor = n - 1
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+}
+
+// visibleRows applies the tier gate and the filter, in list order.
+func (m Model) visibleRows() []Row {
+	if m.deps.Cfg == nil {
+		return nil
+	}
+	needle := strings.ToLower(strings.TrimSpace(m.filter))
+	out := make([]Row, 0, len(m.rows))
+	for _, row := range m.rows {
+		if !row.Verdict.Show && !m.showQuiet {
+			continue
+		}
+		if needle != "" && !rowMatches(row, needle) {
+			continue
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+func rowMatches(row Row, needle string) bool {
+	haystack := strings.ToLower(strings.Join([]string{
+		row.ChatName, row.Item.From, row.Item.Subject, row.Item.Preview,
+	}, " "))
+	return strings.Contains(haystack, needle)
+}
+
+func (m Model) current() (Row, bool) {
+	rows := m.visibleRows()
+	if m.cursor < 0 || m.cursor >= len(rows) {
+		return Row{}, false
+	}
+	return rows[m.cursor], true
+}
+
+// View renders the whole pane.
+func (m Model) View() string {
+	rows := m.visibleRows()
+	var b strings.Builder
+
+	fmt.Fprintf(&b, "attention %d", len(rows))
+	if m.filtering || m.filter != "" {
+		fmt.Fprintf(&b, "  /%s", m.filter)
+	}
+	b.WriteString("\n")
+
+	if m.banner != "" {
+		b.WriteString(m.banner)
+		b.WriteString("\n")
+	}
+	if m.err != "" {
+		b.WriteString(m.err)
+		b.WriteString("\n")
+	}
+
+	if len(rows) == 0 {
+		b.WriteString("nothing needs you\n")
+	}
+	for i, row := range rows {
+		marker := "  "
+		if i == m.cursor {
+			marker = "> "
+		}
+		b.WriteString(marker)
+		b.WriteString(m.renderRow(row))
+		b.WriteString("\n")
+	}
+
+	if m.composer {
+		fmt.Fprintf(&b, "reply to %s: %s\n", m.currentName(), m.composerText)
+	}
+	b.WriteString("j/k move  enter open  a all  r reply  / filter  R reload  q quit\n")
+	return b.String()
+}
+
+func (m Model) renderRow(row Row) string {
+	tag := "[mail]"
+	if row.Item.Source == "chat" {
+		tag = "[chat]"
+	}
+	name := row.ChatName
+	if name == "" {
+		name = "(unknown)"
+	}
+	line := fmt.Sprintf("%s %s  %s", tag, name, row.Item.Preview)
+	return Truncate(line, max(10, m.width-2))
+}
+
+func (m Model) currentName() string {
+	row, ok := m.current()
+	if !ok {
+		return ""
+	}
+	return row.ChatName
+}

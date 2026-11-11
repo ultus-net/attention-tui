@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -201,5 +202,108 @@ func TestMissingTokenReturnsErrNoToken(t *testing.T) {
 	_, err := m.Token(context.Background())
 	if !errors.Is(err, ErrNoToken) {
 		t.Fatalf("err = %v, want ErrNoToken", err)
+	}
+}
+
+func TestRefreshWithClaimsSendsClaimsAndClearsOnSuccess(t *testing.T) {
+	var gotClaims string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("ParseForm: %v", err)
+		}
+		gotClaims = r.PostForm.Get("claims")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"access_token":"new-access","expires_in":3600}`))
+	}))
+	defer srv.Close()
+
+	st := &memStore{tokens: Tokens{RefreshToken: "refresh", Expiry: time.Now().Add(-time.Minute)}, ok: true}
+	m := testManager(st, srv.URL)
+	claims := `{"access_token":{"nbf":{"essential":true,"value":"1"}}}`
+
+	token, err := m.RefreshWithClaims(context.Background(), claims)
+	if err != nil {
+		t.Fatalf("RefreshWithClaims: %v", err)
+	}
+	if token != "new-access" {
+		t.Fatalf("token = %q", token)
+	}
+	if gotClaims != claims {
+		t.Fatalf("claims = %q, want the decoded challenge", gotClaims)
+	}
+	loaded, _, err := st.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.Claims != "" {
+		t.Fatalf("persisted claims = %q, want cleared after success", loaded.Claims)
+	}
+}
+
+func TestInteractionRequiredKeepsTheChallenge(t *testing.T) {
+	var hits atomic.Int32
+	srv := tokenServer(t, &hits, `{"error":"interaction_required","error_description":"AADSTS50076: MFA required"}`, http.StatusBadRequest)
+	st := &memStore{tokens: Tokens{RefreshToken: "refresh", Expiry: time.Now().Add(-time.Minute)}, ok: true}
+	m := testManager(st, srv.URL)
+	claims := `{"access_token":{"nbf":{"essential":true,"value":"1"}}}`
+
+	_, err := m.RefreshWithClaims(context.Background(), claims)
+	if !errors.Is(err, ErrInteractionRequired) {
+		t.Fatalf("err = %v, want ErrInteractionRequired", err)
+	}
+	loaded, _, err := st.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.Claims != claims {
+		t.Fatalf("persisted claims = %q, want the challenge kept for --login", loaded.Claims)
+	}
+}
+
+func TestInvalidGrantMFAIsInteractionRequired(t *testing.T) {
+	var hits atomic.Int32
+	srv := tokenServer(t, &hits, `{"error":"invalid_grant","error_description":"AADSTS50076: MFA required"}`, http.StatusBadRequest)
+	st := &memStore{tokens: Tokens{RefreshToken: "refresh", Expiry: time.Now().Add(-time.Minute)}, ok: true}
+	m := testManager(st, srv.URL)
+
+	_, err := m.Token(context.Background())
+	if !errors.Is(err, ErrInteractionRequired) {
+		t.Fatalf("err = %v, want ErrInteractionRequired", err)
+	}
+	if errors.Is(err, ErrNoToken) {
+		t.Fatal("an MFA demand is not a dead refresh token")
+	}
+}
+
+func TestSignInURLIncludesPendingClaims(t *testing.T) {
+	m := testManager(&memStore{}, "http://unused")
+	m.authorizeURL = "https://login.example/oauth2/authorize"
+	claims := `{"access_token":{"nbf":{"essential":true,"value":"1"}}}`
+
+	raw, err := m.signInURL("state", "verifier", "http://localhost:53147/callback", claims)
+	if err != nil {
+		t.Fatalf("signInURL: %v", err)
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := parsed.Query().Get("claims"); got != claims {
+		t.Fatalf("claims = %q, want the pending challenge", got)
+	}
+	if got := parsed.Query().Get("state"); got != "state" {
+		t.Fatalf("state = %q", got)
+	}
+
+	raw, err = m.signInURL("state", "verifier", "http://localhost:53147/callback", "")
+	if err != nil {
+		t.Fatalf("signInURL: %v", err)
+	}
+	parsed, err = url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if _, ok := parsed.Query()["claims"]; ok {
+		t.Fatal("an empty challenge must not add a claims parameter")
 	}
 }

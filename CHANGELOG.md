@@ -34,6 +34,10 @@ Keep a Changelog, and the project adheres to Semantic Versioning.
 - `SIGHUP` reloads the config and rebuilds the rules engine.
 - Network and auth failures degrade to a one-line banner; the process never
   exits on them.
+- Conditional Access claims challenges from a `401` are answered with a
+  claims-aware token refresh. When the tenant demands interactive re-auth, the
+  challenge is persisted and the banner points at `--login`, which carries the
+  challenge into the sign-in URL.
 - Sample config written on first run, six shared palettes, README with app
   registration steps, and a Makefile.
 

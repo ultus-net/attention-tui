@@ -2,6 +2,7 @@ package graph
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -286,6 +287,80 @@ func TestSameOriginRedirectIsFollowed(t *testing.T) {
 	}
 	if got := hits.Load(); got != 1 {
 		t.Fatalf("followed request count = %d, want 1", got)
+	}
+}
+
+type claimsTokens struct {
+	fakeTokens
+	gotClaims string
+}
+
+func (c *claimsTokens) Refresh(context.Context) (string, error) { return "plain-token", nil }
+
+func (c *claimsTokens) RefreshWithClaims(_ context.Context, claims string) (string, error) {
+	c.gotClaims = claims
+	return "claimed-token", nil
+}
+
+func TestClaimsChallengeDecodesBase64URL(t *testing.T) {
+	claims := `{"access_token":{"nbf":{"essential":true,"value":"1"}}}`
+	encoded := base64.RawURLEncoding.EncodeToString([]byte(claims))
+	resp := &http.Response{Header: http.Header{}}
+	resp.Header.Set("WWW-Authenticate", `Bearer realm="", error="insufficient_claims", claims="`+encoded+`"`)
+
+	if got := claimsChallenge(resp); got != claims {
+		t.Fatalf("claims = %q, want the decoded JSON", got)
+	}
+}
+
+func TestClaimsChallengeIgnoresMalformedValue(t *testing.T) {
+	for _, header := range []string{
+		`Bearer error="insufficient_claims", claims="not base64!"`,
+		`Bearer error="insufficient_claims", claims="` + base64.RawURLEncoding.EncodeToString([]byte("not json")) + `"`,
+		`Bearer error="invalid_token", claims="` + base64.RawURLEncoding.EncodeToString([]byte(`{"a":1}`)) + `"`,
+	} {
+		resp := &http.Response{Header: http.Header{}}
+		resp.Header.Set("WWW-Authenticate", header)
+		if got := claimsChallenge(resp); got != "" {
+			t.Errorf("header %q produced claims %q, want none", header, got)
+		}
+	}
+}
+
+func TestClaimsChallengeRefreshesWithClaims(t *testing.T) {
+	claims := `{"access_token":{"nbf":{"essential":true,"value":"1"}}}`
+	encoded := base64.RawURLEncoding.EncodeToString([]byte(claims))
+	var requests int
+	var secondAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests == 1 {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="", error="insufficient_claims", claims="`+encoded+`"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		secondAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"value":"ok"}`))
+	}))
+	defer srv.Close()
+
+	tokens := &claimsTokens{}
+	c := New(srv.URL, tokens)
+	var out struct {
+		Value string `json:"value"`
+	}
+	if err := c.get(context.Background(), "me/test", &out); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if tokens.gotClaims != claims {
+		t.Fatalf("claims = %q, want the decoded challenge", tokens.gotClaims)
+	}
+	if secondAuth != "Bearer claimed-token" {
+		t.Fatalf("Authorization = %q, want the claims-refreshed token", secondAuth)
+	}
+	if out.Value != "ok" {
+		t.Fatalf("value = %q", out.Value)
 	}
 }
 

@@ -37,11 +37,19 @@ const (
 // and keeps running; the operator runs --login.
 var ErrNoToken = errors.New("auth: no token; run attention-tui --login")
 
+// ErrInteractionRequired means the token service demands an interactive
+// sign-in, usually a Conditional Access claims challenge. The challenge is
+// persisted, so the next --login resolves it without retyping anything.
+var ErrInteractionRequired = errors.New("auth: interactive sign-in required; run attention-tui --login")
+
 // Tokens is the persisted credential. The refresh token is the durable part.
+// Claims holds an outstanding Conditional Access challenge until a sign-in
+// answers it, so a restart does not lose the request.
 type Tokens struct {
 	AccessToken  string    `json:"access_token"`
 	RefreshToken string    `json:"refresh_token"`
 	Expiry       time.Time `json:"expiry"`
+	Claims       string    `json:"claims,omitempty"`
 }
 
 // Store persists tokens. FileStore is the default; KeyringStore is available
@@ -196,12 +204,38 @@ func (m *Manager) Refresh(ctx context.Context) (string, error) {
 	return m.refreshLocked(ctx, tokens)
 }
 
+// RefreshWithClaims answers a Conditional Access claims challenge. It persists
+// the challenge before asking the token service, so a failure leaves the next
+// --login with the request it must satisfy. A successful refresh clears it.
+func (m *Manager) RefreshWithClaims(ctx context.Context, claims string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	tokens, ok, err := m.store.Load()
+	if err != nil {
+		return "", err
+	}
+	if !ok || strings.TrimSpace(tokens.RefreshToken) == "" {
+		return "", ErrNoToken
+	}
+	if claims != "" && claims != tokens.Claims {
+		tokens.Claims = claims
+		if err := m.store.Save(tokens); err != nil {
+			return "", err
+		}
+	}
+	return m.refreshLocked(ctx, tokens)
+}
+
 func (m *Manager) refreshLocked(ctx context.Context, tokens Tokens) (string, error) {
 	form := url.Values{}
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", tokens.RefreshToken)
 	form.Set("client_id", m.cfg.ClientID)
 	form.Set("scope", strings.Join(m.scopes, " "))
+	if strings.TrimSpace(tokens.Claims) != "" {
+		form.Set("claims", tokens.Claims)
+	}
 	if m.cfg.Mode == "confidential" {
 		secret, err := keyring.Get(keyringService, m.cfg.ClientID)
 		if err != nil {
@@ -256,9 +290,6 @@ func (m *Manager) postToken(ctx context.Context, form url.Values) (tokenPayload,
 		return tokenPayload{}, fmt.Errorf("auth: decode token response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK || payload.AccessToken == "" {
-		if payload.Error == "invalid_grant" {
-			return tokenPayload{}, ErrNoToken
-		}
 		detail := strings.TrimSpace(payload.ErrorDescription)
 		if detail == "" {
 			detail = strings.TrimSpace(payload.Error)
@@ -266,12 +297,35 @@ func (m *Manager) postToken(ctx context.Context, form url.Values) (tokenPayload,
 		if detail == "" {
 			detail = resp.Status
 		}
-		return tokenPayload{}, fmt.Errorf("auth: token endpoint: %s", detail)
+		switch {
+		case payload.Error == "interaction_required", payload.Error == "consent_required":
+			return tokenPayload{}, ErrInteractionRequired
+		case payload.Error == "invalid_grant" && interactionRequired(detail):
+			return tokenPayload{}, ErrInteractionRequired
+		case payload.Error == "invalid_grant":
+			return tokenPayload{}, ErrNoToken
+		default:
+			return tokenPayload{}, fmt.Errorf("auth: token endpoint: %s", detail)
+		}
 	}
 	if payload.ExpiresIn <= 0 {
 		payload.ExpiresIn = 3600
 	}
 	return payload, nil
+}
+
+// interactionRequired reports whether an invalid_grant description is a
+// Conditional Access demand rather than a dead refresh token.
+func interactionRequired(detail string) bool {
+	for _, code := range []string{
+		"AADSTS50072", "AADSTS50074", "AADSTS50076", "AADSTS50079",
+		"AADSTS50158", "AADSTS50173", "AADSTS53003", "AADSTS65001",
+	} {
+		if strings.Contains(detail, code) {
+			return true
+		}
+	}
+	return false
 }
 
 // Login runs the authorization-code + PKCE flow: open the browser, receive the
@@ -287,20 +341,21 @@ func (m *Manager) Login(ctx context.Context, open func(string) error) error {
 	}
 	redirectURI := fmt.Sprintf("http://localhost:%d%s", m.cfg.RedirectPort, redirectPath)
 
-	authURL, err := url.Parse(m.authorizeURL)
+	pending, ok, err := m.store.Load()
 	if err != nil {
-		return fmt.Errorf("auth: build authorize URL: %w", err)
+		// --login is the recovery path. An unreadable store must not block it,
+		// so the pending challenge is skipped and the final Save replaces the
+		// store. A write failure still surfaces.
+		ok = false
 	}
-	query := authURL.Query()
-	query.Set("client_id", m.cfg.ClientID)
-	query.Set("response_type", "code")
-	query.Set("redirect_uri", redirectURI)
-	query.Set("response_mode", "query")
-	query.Set("scope", strings.Join(m.scopes, " "))
-	query.Set("state", state)
-	query.Set("code_challenge", PKCEChallenge(verifier))
-	query.Set("code_challenge_method", "S256")
-	authURL.RawQuery = query.Encode()
+	var claims string
+	if ok {
+		claims = pending.Claims
+	}
+	authURL, err := m.signInURL(state, verifier, redirectURI, claims)
+	if err != nil {
+		return err
+	}
 
 	codeCh := make(chan string, 1)
 	errCh := make(chan error, 1)
@@ -336,7 +391,7 @@ func (m *Manager) Login(ctx context.Context, open func(string) error) error {
 	go server.Serve(listener)
 	defer server.Shutdown(context.Background())
 
-	if err := open(authURL.String()); err != nil {
+	if err := open(authURL); err != nil {
 		return fmt.Errorf("auth: open browser: %w", err)
 	}
 
@@ -380,6 +435,29 @@ func (m *Manager) Login(ctx context.Context, open func(string) error) error {
 		return errors.New("auth: no refresh token returned; the app needs offline_access")
 	}
 	return m.store.Save(tokens)
+}
+
+// signInURL builds the sign-in URL. A non-empty claims value asks the service
+// to satisfy an outstanding Conditional Access challenge.
+func (m *Manager) signInURL(state, verifier, redirectURI, claims string) (string, error) {
+	authURL, err := url.Parse(m.authorizeURL)
+	if err != nil {
+		return "", fmt.Errorf("auth: build authorize URL: %w", err)
+	}
+	query := authURL.Query()
+	query.Set("client_id", m.cfg.ClientID)
+	query.Set("response_type", "code")
+	query.Set("redirect_uri", redirectURI)
+	query.Set("response_mode", "query")
+	query.Set("scope", strings.Join(m.scopes, " "))
+	query.Set("state", state)
+	query.Set("code_challenge", PKCEChallenge(verifier))
+	query.Set("code_challenge_method", "S256")
+	if strings.TrimSpace(claims) != "" {
+		query.Set("claims", claims)
+	}
+	authURL.RawQuery = query.Encode()
+	return authURL.String(), nil
 }
 
 // PKCEChallenge is base64url(sha256(verifier)) without padding.

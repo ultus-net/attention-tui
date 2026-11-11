@@ -300,6 +300,9 @@ func alertTitle(it rules.Item) string {
 }
 
 func bannerFor(err error) string {
+	if errors.Is(err, auth.ErrInteractionRequired) {
+		return "auth: sign-in required; run attention-tui --login"
+	}
 	if errors.Is(err, auth.ErrNoToken) {
 		return "auth: no token; run attention-tui --login"
 	}

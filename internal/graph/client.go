@@ -4,6 +4,7 @@ package graph
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,6 +46,13 @@ type TokenSource interface {
 // 401. Client uses it when available.
 type tokenRefresher interface {
 	Refresh(ctx context.Context) (string, error)
+}
+
+// claimsRefresher is implemented by sources that can answer a Conditional
+// Access claims challenge carried by a 401. Client prefers it over
+// tokenRefresher when the response names claims.
+type claimsRefresher interface {
+	RefreshWithClaims(ctx context.Context, claims string) (string, error)
 }
 
 // Client is safe for concurrent use by multiple goroutines.
@@ -131,6 +139,7 @@ func (c *Client) getWithPrefer(ctx context.Context, url, prefer string, out any)
 		}
 
 		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
+		claims := claimsChallenge(resp)
 		resp.Body.Close()
 		if readErr != nil {
 			return fmt.Errorf("graph: read error body: %w", readErr)
@@ -139,7 +148,7 @@ func (c *Client) getWithPrefer(ctx context.Context, url, prefer string, out any)
 		switch {
 		case resp.StatusCode == http.StatusUnauthorized && !refreshed:
 			refreshed = true
-			token, err = c.forceToken(ctx)
+			token, err = c.forceTokenWithClaims(ctx, claims)
 			if err != nil {
 				return fmt.Errorf("graph: refresh after 401: %w", err)
 			}
@@ -174,6 +183,90 @@ func (c *Client) forceToken(ctx context.Context) (string, error) {
 		return r.Refresh(ctx)
 	}
 	return c.tokens.Token(ctx)
+}
+
+// forceTokenWithClaims honors a Conditional Access claims challenge. When the
+// source cannot answer claims, it falls back to a plain refresh so a server
+// that sends a stray challenge cannot wedge the client.
+func (c *Client) forceTokenWithClaims(ctx context.Context, claims string) (string, error) {
+	if claims != "" {
+		if r, ok := c.tokens.(claimsRefresher); ok {
+			return r.RefreshWithClaims(ctx, claims)
+		}
+	}
+	return c.forceToken(ctx)
+}
+
+// claimsChallenge returns the decoded claims JSON from a 401 response, or "".
+// Graph sends it as a base64url value in the WWW-Authenticate header. A value
+// that does not decode to JSON is ignored, because a malformed challenge must
+// not change how the token is refreshed.
+func claimsChallenge(resp *http.Response) string {
+	for _, header := range resp.Header.Values("WWW-Authenticate") {
+		params := authParams(header)
+		if !strings.EqualFold(params["error"], "insufficient_claims") {
+			continue
+		}
+		raw := params["claims"]
+		if raw == "" {
+			continue
+		}
+		decoded, err := base64.RawURLEncoding.DecodeString(raw)
+		if err != nil {
+			decoded, err = base64.URLEncoding.DecodeString(raw)
+			if err != nil {
+				continue
+			}
+		}
+		if json.Valid(decoded) {
+			return string(decoded)
+		}
+	}
+	return ""
+}
+
+// authParams parses a WWW-Authenticate header into its key/value pairs. It
+// understands quoted values and stops at a malformed pair rather than guessing.
+func authParams(header string) map[string]string {
+	out := make(map[string]string)
+	if i := strings.IndexByte(header, ' '); i >= 0 {
+		header = header[i+1:]
+	}
+	for {
+		header = strings.TrimLeft(header, " ,")
+		if header == "" {
+			return out
+		}
+		eq := strings.IndexByte(header, '=')
+		if eq < 0 {
+			return out
+		}
+		key := strings.ToLower(strings.TrimSpace(header[:eq]))
+		header = header[eq+1:]
+
+		var value string
+		if strings.HasPrefix(header, `"`) {
+			header = header[1:]
+			end := strings.IndexByte(header, '"')
+			if end < 0 {
+				value = header
+				header = ""
+			} else {
+				value = header[:end]
+				header = header[end+1:]
+			}
+		} else {
+			end := strings.IndexByte(header, ',')
+			if end < 0 {
+				value = header
+				header = ""
+			} else {
+				value = header[:end]
+				header = header[end:]
+			}
+		}
+		out[key] = value
+	}
 }
 
 // resolve turns a Graph path or continuation link into an absolute URL. An

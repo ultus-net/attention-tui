@@ -2,17 +2,28 @@ package ui
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 
 	"github.com/ultus-net/attention-tui/internal/config"
 	"github.com/ultus-net/attention-tui/internal/rules"
 	"github.com/ultus-net/attention-tui/internal/store"
+	"github.com/ultus-net/attention-tui/internal/theme"
 )
+
+// TestMain forces a colour profile so escape gating is observable under
+// `go test`, where stdout is a pipe and lipgloss degrades to no colour.
+func TestMain(m *testing.M) {
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	os.Exit(m.Run())
+}
 
 type recorder struct {
 	opened   string
@@ -254,5 +265,19 @@ func TestPromptIgnoresEmptyRuneKeys(t *testing.T) {
 	m = press(t, m, tea.KeyMsg{Type: tea.KeyCtrlA})
 	if m.filter != "a" {
 		t.Fatalf("filter = %q, want %q", m.filter, "a")
+	}
+}
+
+func TestColourGateControlsEscapes(t *testing.T) {
+	d, _, _ := testDeps(t, chatItem("c1"))
+	d.Palette = theme.Get(theme.DefaultName)
+
+	if view := New(d).View(); strings.Contains(view, "\x1b[") {
+		t.Fatalf("color off emitted escape codes: %q", view)
+	}
+
+	d.Color = true
+	if view := New(d).View(); !strings.Contains(view, "\x1b[") {
+		t.Fatal("color on emitted no escape codes for an alert row")
 	}
 }

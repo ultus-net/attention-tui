@@ -164,8 +164,11 @@ everything.
 
 ### Passive pane
 
-`--passive` renders a fixed-height block sized from `COLUMNS` and `LINES`, so
-it can sit in a tmux pane:
+`--passive` renders a fixed-height block sized from the terminal, falling back
+to `COLUMNS` and `LINES`, so it can sit in a tmux pane. It redraws the block in
+place instead of clearing the screen. A piped `--passive` prints one plain
+block and exits, which suits status scripts. Colours come from `theme`;
+`NO_COLOR` or `TERM=dumb` disables them.
 
 ```tmux
 # ~/.tmux.conf

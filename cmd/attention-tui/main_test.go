@@ -210,3 +210,120 @@ rules:
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+func TestTerminalSizeFallsBackToEnv(t *testing.T) {
+	t.Setenv("COLUMNS", "132")
+	t.Setenv("LINES", "43")
+
+	width, height, tty := terminalSize(&bytes.Buffer{})
+	if tty {
+		t.Fatal("a bytes.Buffer is not a terminal")
+	}
+	if width != 132 || height != 43 {
+		t.Fatalf("size = %dx%d, want 132x43 from COLUMNS/LINES", width, height)
+	}
+}
+
+func TestPaneSizeOffTerminalUsesFullWidth(t *testing.T) {
+	t.Setenv("COLUMNS", "100")
+	t.Setenv("LINES", "30")
+
+	width, height, tty, color := paneSize(&bytes.Buffer{})
+	if width != 100 || height != 30 {
+		t.Fatalf("size = %dx%d, want 100x30", width, height)
+	}
+	if tty || color {
+		t.Fatalf("tty = %v, color = %v; a buffer must be plain", tty, color)
+	}
+}
+
+func TestColorEnabled(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm-256color")
+	if !colorEnabled(true) {
+		t.Fatal("colour should be on for a terminal without NO_COLOR")
+	}
+	if colorEnabled(false) {
+		t.Fatal("colour must be off for a non-terminal")
+	}
+	t.Setenv("NO_COLOR", "1")
+	if colorEnabled(true) {
+		t.Fatal("NO_COLOR must suppress colour")
+	}
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "dumb")
+	if colorEnabled(true) {
+		t.Fatal("TERM=dumb must suppress colour")
+	}
+}
+
+func TestBlockRendererRedrawsInPlace(t *testing.T) {
+	var out bytes.Buffer
+	r := &blockRenderer{out: &out, interactive: true}
+
+	r.Render([]string{"one", "two", "three"})
+	if got := out.String(); strings.Count(got, "\r\x1b[2K") != 3 {
+		t.Fatalf("first render = %q, want three cleared lines", got)
+	}
+
+	out.Reset()
+	r.Render([]string{"one", "two"})
+	got := out.String()
+	if !strings.HasPrefix(got, "\x1b[3A") {
+		t.Fatalf("second render = %q, want a cursor-up of 3 lines first", got)
+	}
+	if strings.Count(got, "\r\x1b[2K") != 3 {
+		t.Fatalf("second render = %q, want three cleared lines", got)
+	}
+	if !strings.Contains(got, "\x1b[1A") {
+		t.Fatalf("second render = %q, want the cursor lifted back to line 2", got)
+	}
+
+	out.Reset()
+	r.Render([]string{"one", "two"})
+	if !strings.HasPrefix(out.String(), "\x1b[2A") {
+		t.Fatalf("third render = %q, want a cursor-up of 2 lines", out.String())
+	}
+}
+
+func TestBlockRendererPlainForNonTerminal(t *testing.T) {
+	var out bytes.Buffer
+	r := &blockRenderer{out: &out, interactive: false}
+	r.Render([]string{"one", "two"})
+	r.Finish()
+	if got := out.String(); got != "one\ntwo\n" {
+		t.Fatalf("output = %q, want a plain block", got)
+	}
+}
+
+func TestPassivePipedPrintsOneBlockAndExits(t *testing.T) {
+	cfgPath, dataDir := setup(t)
+	seedToken(t, dataDir)
+
+	original := newSource
+	t.Cleanup(func() { newSource = original })
+	newSource = func(*graph.Client) appSource { return &fakeSource{} }
+
+	done := make(chan struct{})
+	var out, errOut bytes.Buffer
+	code := 0
+	go func() {
+		code = run([]string{"--config", cfgPath, "--passive"}, &out, &errOut)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("--passive did not exit for a piped writer")
+	}
+	if code != 0 {
+		t.Fatalf("code = %d, want 0, stderr: %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "attention 0") {
+		t.Fatalf("stdout = %q, want one block", out.String())
+	}
+	if strings.Contains(out.String(), "\x1b[") {
+		t.Fatalf("stdout = %q, want no escapes for a piped writer", out.String())
+	}
+}

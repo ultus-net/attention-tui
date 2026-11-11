@@ -12,6 +12,7 @@ import (
 	"github.com/ultus-net/attention-tui/internal/config"
 	"github.com/ultus-net/attention-tui/internal/rules"
 	"github.com/ultus-net/attention-tui/internal/store"
+	"github.com/ultus-net/attention-tui/internal/theme"
 )
 
 // Row is one rendered item with the tier it landed in.
@@ -30,6 +31,10 @@ type Deps struct {
 	Open   func(string) error
 	Send   func(ctx context.Context, chatID, text string) error
 	Banner string
+	// Palette colours rows when Color is true. Color is false for a
+	// non-terminal writer or when NO_COLOR is set.
+	Palette theme.Palette
+	Color   bool
 	// EngineFunc lets the process swap in a rebuilt rules engine on SIGHUP.
 	// When nil, Engine is used.
 	EngineFunc func() *rules.Engine
@@ -51,7 +56,9 @@ type Model struct {
 	composer     bool
 	composerText string
 
-	width int
+	width   int
+	palette theme.Palette
+	color   bool
 }
 
 type tickMsg struct{}
@@ -66,7 +73,7 @@ type RefreshMsg struct{}
 
 // New builds a model and loads the current cache.
 func New(d Deps) Model {
-	m := Model{deps: d, banner: d.Banner, width: 80}
+	m := Model{deps: d, banner: d.Banner, width: 80, palette: d.Palette, color: d.Color}
 	m.reload()
 	return m
 }
@@ -326,10 +333,11 @@ func (m Model) View() string {
 	rows := m.visibleRows()
 	var b strings.Builder
 
-	fmt.Fprintf(&b, "attention %d", len(rows))
+	header := fmt.Sprintf("attention %d", len(rows))
 	if m.filtering || m.filter != "" {
-		fmt.Fprintf(&b, "  /%s", m.filter)
+		header += "  /" + m.filter
 	}
+	b.WriteString(paint(header, m.palette.Accent, m.color))
 	b.WriteString("\n")
 
 	if m.banner != "" {
@@ -363,15 +371,23 @@ func (m Model) View() string {
 
 func (m Model) renderRow(row Row) string {
 	tag := "[mail]"
+	tagColor := m.palette.Mail
 	if row.Item.Source == "chat" {
 		tag = "[chat]"
+		tagColor = m.palette.Chat
 	}
 	name := row.ChatName
 	if name == "" {
 		name = "(unknown)"
 	}
-	line := fmt.Sprintf("%s %s  %s", tag, name, row.Item.Preview)
-	return Truncate(line, max(10, m.width-2))
+	line := Truncate(fmt.Sprintf("%s %s  %s", tag, name, row.Item.Preview), max(10, m.width-2))
+	if !m.color {
+		return line
+	}
+	if row.Verdict.Notify {
+		return paint(line, m.palette.Alert, true)
+	}
+	return paint(tag, tagColor, true) + strings.TrimPrefix(line, tag)
 }
 
 func (m Model) currentName() string {

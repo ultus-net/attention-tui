@@ -14,11 +14,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"golang.org/x/term"
 
 	"github.com/ultus-net/attention-tui/internal/app"
 	"github.com/ultus-net/attention-tui/internal/auth"
@@ -166,8 +168,8 @@ func runOnce(ctx context.Context, cfg *config.Config, rt *appRuntime, st *store.
 	}
 
 	rows := rowsFromStore(ctx, st, rt)
-	width, height := terminalSize()
-	fmt.Fprintln(stdout, ui.RenderPassive(limitRows(rows, cfg.PassiveItems), width, height, theme.Get(cfg.Theme)))
+	width, height, _, color := paneSize(stdout)
+	fmt.Fprintln(stdout, ui.RenderPassive(limitRows(rows, cfg.PassiveItems), width, height, theme.Get(cfg.Theme), color))
 	return code
 }
 
@@ -177,7 +179,9 @@ func runPassive(ctx context.Context, cfg *config.Config, rt *appRuntime, st *sto
 	if primary {
 		runner = app.NewRunner(cfg, st, newSource(graph.New("", mgr)))
 	}
-	width, height := terminalSize()
+	_, _, tty, _ := paneSize(stdout)
+	renderer := &blockRenderer{out: stdout, interactive: tty}
+	defer renderer.Finish()
 
 	for {
 		if runner != nil {
@@ -189,8 +193,15 @@ func runPassive(ctx context.Context, cfg *config.Config, rt *appRuntime, st *sto
 			}
 		}
 		rows := rowsFromStore(ctx, st, rt)
-		block := ui.RenderPassive(limitRows(rows, cfg.PassiveItems), width, height, theme.Get(rt.config().Theme))
-		fmt.Fprint(stdout, "\x1b[H\x1b[2J", block, "\n")
+		width, height, _, color := paneSize(stdout)
+		block := ui.RenderPassive(limitRows(rows, cfg.PassiveItems), width, height, theme.Get(rt.config().Theme), color)
+		renderer.Render(strings.Split(block, "\n"))
+
+		// A piped writer cannot be redrawn in place, so print one block and
+		// exit instead of looping escape sequences into a file.
+		if !tty {
+			return 0
+		}
 
 		wait := cfg.PollInterval.Std()
 		if runner != nil && runner.Backoff() > 0 {
@@ -208,6 +219,7 @@ func runInteractive(ctx context.Context, cfg *config.Config, rt *appRuntime, st 
 		banner = "secondary: cache only"
 	}
 	client := graph.New("", mgr)
+	_, _, tty := terminalSize(os.Stdout)
 	deps := ui.Deps{
 		Store:      st,
 		Engine:     rt.engineSnapshot(),
@@ -216,6 +228,8 @@ func runInteractive(ctx context.Context, cfg *config.Config, rt *appRuntime, st 
 		Open:       openBrowser,
 		Send:       client.SendChatMessage,
 		Banner:     banner,
+		Palette:    theme.Get(cfg.Theme),
+		Color:      colorEnabled(tty),
 	}
 	if !primary {
 		deps.Send = nil
@@ -322,15 +336,85 @@ func limitRows(rows []ui.Row, max int) []ui.Row {
 	return rows
 }
 
-func terminalSize() (int, int) {
-	width, height := 80, 24
+// terminalSize prefers the real terminal size, then COLUMNS/LINES, then 80x24.
+// The tty flag tells the caller whether escape sequences are safe.
+func terminalSize(out io.Writer) (width, height int, tty bool) {
+	if f, ok := out.(*os.File); ok {
+		fd := int(f.Fd())
+		if term.IsTerminal(fd) {
+			if w, h, err := term.GetSize(fd); err == nil && w > 0 && h > 0 {
+				return w, h, true
+			}
+			tty = true
+		}
+	}
+	width, height = 80, 24
 	if v, err := strconv.Atoi(os.Getenv("COLUMNS")); err == nil && v > 0 {
 		width = v
 	}
 	if v, err := strconv.Atoi(os.Getenv("LINES")); err == nil && v > 0 {
 		height = v
 	}
-	return width, height
+	return width, height, tty
+}
+
+// colorEnabled reports whether colour escapes may be written. NO_COLOR and a
+// dumb terminal both suppress them, as does a non-terminal writer.
+func colorEnabled(tty bool) bool {
+	return tty && os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "dumb"
+}
+
+// paneSize returns the render width, height, tty flag and colour flag. On a
+// terminal the width is one cell short, so a full line never wraps the cursor.
+func paneSize(out io.Writer) (width, height int, tty, color bool) {
+	width, height, tty = terminalSize(out)
+	color = colorEnabled(tty)
+	if tty && width > 1 {
+		width--
+	}
+	return width, height, tty, color
+}
+
+// blockRenderer redraws the passive block in place. A non-interactive writer
+// receives one plain block and no escape sequences.
+type blockRenderer struct {
+	out         io.Writer
+	prev        int
+	interactive bool
+}
+
+// Render clears the previous block and writes the new one. The cursor ends on
+// the line below the block so the next clear lands correctly.
+func (r *blockRenderer) Render(lines []string) {
+	if !r.interactive {
+		fmt.Fprint(r.out, strings.Join(lines, "\n")+"\n")
+		return
+	}
+	if r.prev > 0 {
+		fmt.Fprintf(r.out, "\x1b[%dA", r.prev)
+	}
+	rows := r.prev
+	if len(lines) > rows {
+		rows = len(lines)
+	}
+	for i := 0; i < rows; i++ {
+		fmt.Fprint(r.out, "\r\x1b[2K")
+		if i < len(lines) {
+			fmt.Fprint(r.out, lines[i])
+		}
+		fmt.Fprint(r.out, "\n")
+	}
+	if rows > len(lines) {
+		fmt.Fprintf(r.out, "\x1b[%dA", rows-len(lines))
+	}
+	r.prev = len(lines)
+}
+
+// Finish leaves the terminal on a clean line after the block.
+func (r *blockRenderer) Finish() {
+	if r.prev > 0 {
+		fmt.Fprint(r.out, "\n")
+	}
 }
 
 func openBrowser(url string) error {

@@ -20,8 +20,15 @@ Keep a Changelog, and the project adheres to Semantic Versioning.
   names, subject regex, importance, focused and flagged matching.
 - Bubble Tea pane with cursor, tier reveal, filter, local seen marking, and
   Teams chat replies.
-- Fixed-height passive renderer for `--passive` and `--once`, sized from
-  `COLUMNS` and `LINES`.
+- Fixed-height passive renderer for `--passive` and `--once`, sized from the
+  terminal, falling back to `COLUMNS` and `LINES`.
+- The passive block redraws in place with a cursor-up clear instead of
+  clearing the whole screen.
+- A piped `--passive` prints one plain block and exits, with no escape
+  sequences.
+- The configured palette colours the pane header, tier tags, alert rows, and
+  passive footer. `NO_COLOR`, `TERM=dumb`, and a non-terminal writer turn
+  colour off.
 - Desktop notifications for alert-tier rows, coalesced to one message per poll.
 - Single-instance `flock`; a second instance runs cache-only and says so.
 - `SIGHUP` reloads the config and rebuilds the rules engine.

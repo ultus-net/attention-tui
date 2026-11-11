@@ -9,8 +9,9 @@ import (
 )
 
 // RenderPassive renders a fixed block: exactly height lines, each at most width
-// cells. The caller decides which rows are eligible.
-func RenderPassive(rows []Row, width, height int, p theme.Palette) string {
+// cells. The caller decides which rows are eligible, and whether the writer can
+// take colour. Painting happens after truncation so escapes never affect width.
+func RenderPassive(rows []Row, width, height int, p theme.Palette, color bool) string {
 	if height <= 0 {
 		return ""
 	}
@@ -20,7 +21,8 @@ func RenderPassive(rows []Row, width, height int, p theme.Palette) string {
 	ordered := orderRows(rows)
 
 	lines := make([]string, 0, height)
-	lines = append(lines, Truncate(fmt.Sprintf("attention %d", len(rows)), width))
+	header := Truncate(fmt.Sprintf("attention %d", len(rows)), width)
+	lines = append(lines, paint(header, p.Accent, color))
 	if height == 1 {
 		return lines[0]
 	}
@@ -28,7 +30,11 @@ func RenderPassive(rows []Row, width, height int, p theme.Palette) string {
 	body := height - 2
 	for i := 0; i < body; i++ {
 		if i < len(ordered) {
-			lines = append(lines, passiveRow(ordered[i], width))
+			row := passiveRow(ordered[i], width)
+			if ordered[i].Verdict.Notify {
+				row = paint(row, p.Alert, color)
+			}
+			lines = append(lines, row)
 			continue
 		}
 		lines = append(lines, "")
@@ -38,7 +44,7 @@ func RenderPassive(rows []Row, width, height int, p theme.Palette) string {
 		lines[len(lines)-1] = Truncate(fmt.Sprintf("… and %d more", hidden), width)
 	}
 
-	lines = append(lines, Truncate("run attention-tui for keys", width))
+	lines = append(lines, paint(Truncate("run attention-tui for keys", width), p.Muted, color))
 	for len(lines) < height {
 		lines = append(lines, "")
 	}

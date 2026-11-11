@@ -21,14 +21,14 @@ func row(id, source string, notify bool) Row {
 
 func TestPassiveHasExactHeight(t *testing.T) {
 	rows := []Row{row("1", "mail", false), row("2", "chat", true), row("3", "mail", false)}
-	out := RenderPassive(rows, 60, 8, theme.Get("catppuccin-mocha"))
+	out := RenderPassive(rows, 60, 8, theme.Get("catppuccin-mocha"), false)
 	if got := len(strings.Split(out, "\n")); got != 8 {
 		t.Fatalf("lines = %d, want 8\n%s", got, out)
 	}
 }
 
 func TestPassiveEmptyIsZero(t *testing.T) {
-	out := RenderPassive(nil, 60, 6, theme.Get("catppuccin-mocha"))
+	out := RenderPassive(nil, 60, 6, theme.Get("catppuccin-mocha"), false)
 	if !strings.Contains(out, "attention 0") {
 		t.Fatalf("out = %q, want attention 0", out)
 	}
@@ -67,7 +67,7 @@ func TestPassiveNarrowWidthDoesNotPanic(t *testing.T) {
 		Verdict:  rules.Verdict{Show: true, Notify: true},
 		ChatName: strings.Repeat("Very Long Name ", 10),
 	}
-	out := RenderPassive([]Row{src}, 20, 6, theme.Get("catppuccin-mocha"))
+	out := RenderPassive([]Row{src}, 20, 6, theme.Get("catppuccin-mocha"), false)
 	lines := strings.Split(out, "\n")
 	if len(lines) != 6 {
 		t.Fatalf("lines = %d, want 6", len(lines))
@@ -77,4 +77,44 @@ func TestPassiveNarrowWidthDoesNotPanic(t *testing.T) {
 			t.Fatalf("line %q is %d cells wide, want <= 20", line, w)
 		}
 	}
+}
+
+func TestPassiveColourGatedAndWidthSafe(t *testing.T) {
+	rows := []Row{row("1", "chat", true), row("2", "mail", false)}
+	palette := theme.Get("catppuccin-mocha")
+
+	plain := RenderPassive(rows, 30, 6, palette, false)
+	if strings.Contains(plain, "\x1b[") {
+		t.Fatalf("plain block carries escape codes: %q", plain)
+	}
+
+	colored := RenderPassive(rows, 30, 6, palette, true)
+	if !strings.Contains(colored, "\x1b[") {
+		t.Fatal("colored block carries no escape codes")
+	}
+	lines := strings.Split(colored, "\n")
+	if len(lines) != 6 {
+		t.Fatalf("lines = %d, want 6", len(lines))
+	}
+	for _, line := range lines {
+		if w := runewidth.StringWidth(stripANSI(line)); w > 30 {
+			t.Fatalf("line %q is %d cells wide after stripping escapes, want <= 30", stripANSI(line), w)
+		}
+	}
+}
+
+func stripANSI(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == 0x1b && i+1 < len(s) && s[i+1] == '[' {
+			j := i + 2
+			for j < len(s) && s[j] != 'm' {
+				j++
+			}
+			i = j
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }

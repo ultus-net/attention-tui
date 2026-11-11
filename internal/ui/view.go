@@ -3,6 +3,7 @@ package ui
 import (
 	"strings"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -30,4 +31,14 @@ func Truncate(s string, width int) string {
 	}
 	b.WriteString("…")
 	return b.String()
+}
+
+// paint colours an already-truncated line. Colouring after truncation keeps
+// escape bytes out of the width calculation. enabled=false leaves s untouched,
+// which is what NO_COLOR and a non-terminal writer want.
+func paint(s string, c lipgloss.Color, enabled bool) string {
+	if !enabled || s == "" || c == "" {
+		return s
+	}
+	return lipgloss.NewStyle().Foreground(c).Render(s)
 }

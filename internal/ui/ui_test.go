@@ -198,3 +198,61 @@ func TestFilterNarrowsRows(t *testing.T) {
 		t.Fatalf("filtered rows = %d, want 1", len(rows))
 	}
 }
+
+// Terminals disagree on what they send for the backspace key: 127, ctrl+h, or
+// the delete escape sequence. All three must edit the prompt.
+var backspaceVariants = []tea.KeyType{tea.KeyBackspace, tea.KeyCtrlH, tea.KeyDelete}
+
+func TestFilterDeletesOnEveryBackspaceVariant(t *testing.T) {
+	for _, variant := range backspaceVariants {
+		d, _, _ := testDeps(t, mailItem("m1", "Ana", "one"))
+		m := New(d)
+		m = press(t, m, runeKey('/'))
+		for _, r := range "ana" {
+			m = press(t, m, runeKey(r))
+		}
+		m = press(t, m, tea.KeyMsg{Type: variant})
+		if m.filter != "an" {
+			t.Fatalf("%v: filter = %q, want %q", variant, m.filter, "an")
+		}
+	}
+}
+
+func TestComposerDeletesOnEveryBackspaceVariant(t *testing.T) {
+	for _, variant := range backspaceVariants {
+		d, _, _ := testDeps(t, chatItem("c1"))
+		m := New(d)
+		m = press(t, m, runeKey('r'))
+		for _, r := range "hi" {
+			m = press(t, m, runeKey(r))
+		}
+		m = press(t, m, tea.KeyMsg{Type: variant})
+		if m.composerText != "h" {
+			t.Fatalf("%v: composer text = %q, want %q", variant, m.composerText, "h")
+		}
+	}
+}
+
+func TestFilterKeepsSpaces(t *testing.T) {
+	d, _, _ := testDeps(t, mailItem("m1", "Ana Lima", "one"))
+	m := New(d)
+	m = press(t, m, runeKey('/'))
+	m = press(t, m, runeKey('a'))
+	m = press(t, m, tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	m = press(t, m, runeKey('l'))
+	if m.filter != "a l" {
+		t.Fatalf("filter = %q, want %q", m.filter, "a l")
+	}
+}
+
+func TestPromptIgnoresEmptyRuneKeys(t *testing.T) {
+	d, _, _ := testDeps(t, mailItem("m1", "Ana", "one"))
+	m := New(d)
+	m = press(t, m, runeKey('/'))
+	m = press(t, m, runeKey('a'))
+	m = press(t, m, tea.KeyMsg{Type: tea.KeyLeft, Runes: nil})
+	m = press(t, m, tea.KeyMsg{Type: tea.KeyCtrlA})
+	if m.filter != "a" {
+		t.Fatalf("filter = %q, want %q", m.filter, "a")
+	}
+}

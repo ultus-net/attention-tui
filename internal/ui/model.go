@@ -158,17 +158,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleFilter(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyEsc:
+	switch {
+	case msg.Type == tea.KeyEsc:
 		m.filtering = false
 		m.filter = ""
-	case tea.KeyEnter:
+	case msg.Type == tea.KeyEnter:
 		m.filtering = false
-	case tea.KeyBackspace:
-		if r := []rune(m.filter); len(r) > 0 {
-			m.filter = string(r[:len(r)-1])
-		}
-	default:
+	case isBackspace(msg):
+		m.filter = dropLastRune(m.filter)
+	case len(msg.Runes) > 0:
 		m.filter += string(msg.Runes)
 	}
 	m.clampCursor()
@@ -176,15 +174,13 @@ func (m Model) handleFilter(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleComposer(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyEsc:
+	switch {
+	case msg.Type == tea.KeyEsc:
 		m.composer = false
 		m.composerText = ""
-	case tea.KeyBackspace:
-		if r := []rune(m.composerText); len(r) > 0 {
-			m.composerText = string(r[:len(r)-1])
-		}
-	case tea.KeyEnter:
+	case isBackspace(msg):
+		m.composerText = dropLastRune(m.composerText)
+	case msg.Type == tea.KeyEnter:
 		row, ok := m.current()
 		if !ok || m.deps.Send == nil {
 			m.composer = false
@@ -207,10 +203,29 @@ func (m Model) handleComposer(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return reloadMsg{}
 		}
-	default:
+	case len(msg.Runes) > 0:
 		m.composerText += string(msg.Runes)
 	}
 	return m, nil
+}
+
+// isBackspace covers every key a terminal may send for a backspace: 127,
+// ctrl+h, and the delete escape sequence. The prompts are one line, so delete
+// and backspace make the same edit.
+func isBackspace(msg tea.KeyMsg) bool {
+	switch msg.Type {
+	case tea.KeyBackspace, tea.KeyCtrlH, tea.KeyDelete:
+		return true
+	}
+	return false
+}
+
+func dropLastRune(s string) string {
+	r := []rune(s)
+	if len(r) == 0 {
+		return s
+	}
+	return string(r[:len(r)-1])
 }
 
 func (m *Model) openCurrent() {

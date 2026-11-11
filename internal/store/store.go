@@ -190,6 +190,40 @@ func (s *Store) SetSeen(ctx context.Context, source, id string) error {
 	return nil
 }
 
+// DeleteItems removes rows the source reports as no longer present, such as a
+// mail message moved out of the inbox. It returns how many rows were removed.
+func (s *Store) DeleteItems(ctx context.Context, source string, ids []string) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("store: begin delete: %w", err)
+	}
+	defer tx.Rollback()
+	del, err := tx.PrepareContext(ctx, `DELETE FROM items WHERE source = ? AND id = ?`)
+	if err != nil {
+		return 0, fmt.Errorf("store: prepare delete: %w", err)
+	}
+	defer del.Close()
+	deleted := 0
+	for _, id := range ids {
+		res, err := del.ExecContext(ctx, source, id)
+		if err != nil {
+			return 0, fmt.Errorf("store: delete %s/%s: %w", source, id, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return 0, fmt.Errorf("store: delete %s/%s: %w", source, id, err)
+		}
+		deleted += int(n)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("store: commit delete: %w", err)
+	}
+	return deleted, nil
+}
+
 // PendingNotifications returns unseen rows first seen inside window that have
 // never notified. It only selects; the caller decides which are alert-tier and
 // stamps them with MarkNotified.

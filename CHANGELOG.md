@@ -47,3 +47,14 @@ Review-round corrections before the first release:
   replays the delta instead of skipping mail.
 - A newer message on a chat re-arms its row, clearing seen and notified state.
 - The filter and reply prompts accept every backspace key a terminal may send.
+- The Graph transport refuses an absolute `nextLink` or `deltaLink` on another
+  origin, and refuses cross-origin redirects, so the bearer token cannot leave
+  the configured Graph origin.
+- Mail delta `@removed` entries delete the cached row immediately, so a message
+  read, moved, or deleted out of the inbox disappears now rather than at the
+  retention point.
+- The mail delta asks for pages with `Prefer: odata.maxpagesize=1000` and
+  immutable IDs. The endpoint ignores `$top`, so the old `$top=50` did nothing.
+- A 1:1 chat is named after the other participant; the signed-in user is no
+  longer listed in the chat name.
+- A chat row is flagged as a mention only when the mentioning message is unread.

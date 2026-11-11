@@ -11,9 +11,9 @@ import (
 )
 
 const (
-	mailDeltaPath = "me/mailFolders/inbox/messages/delta"
-	mailTop       = 50
-	mailSelect    = "id,subject,from,bodyPreview,webLink,importance,receivedDateTime,isRead,inferenceClassification,flag,hasAttachments"
+	mailDeltaPath  = "me/mailFolders/inbox/messages/delta"
+	mailSelect     = "id,subject,from,bodyPreview,webLink,importance,receivedDateTime,isRead,inferenceClassification,flag,hasAttachments"
+	mailPagePrefer = `IdType="ImmutableId", odata.maxpagesize=1000`
 )
 
 // MailMessage is one inbox message reduced to the fields the pane renders.
@@ -33,7 +33,10 @@ type MailMessage struct {
 
 // MailDeltaResult is one page of a delta walk.
 type MailDeltaResult struct {
-	Messages  []MailMessage
+	Messages []MailMessage
+	// Deleted holds IDs Graph reports as no longer in the inbox: the message
+	// was deleted, or moved to another folder.
+	Deleted   []string
 	NextLink  string
 	DeltaLink string
 	// Restart is set when the delta link expired, so the caller must begin a
@@ -57,7 +60,12 @@ type mailMessage struct {
 	IsRead      bool   `json:"isRead"`
 	Focused     string `json:"inferenceClassification"`
 	HasAttach   bool   `json:"hasAttachments"`
-	From        struct {
+	// Removed is set when the message left the inbox. Graph sends only the id
+	// and this object for such an entry.
+	Removed *struct {
+		Reason string `json:"reason"`
+	} `json:"@removed"`
+	From struct {
 		EmailAddress struct {
 			Name    string `json:"name"`
 			Address string `json:"address"`
@@ -70,16 +78,17 @@ type mailMessage struct {
 
 // MailDelta fetches one page of the inbox delta. An empty URL starts at the
 // inbox root. An expired delta returns Restart with a nil error.
+//
+// The delta endpoint ignores $top, so the page size goes in a Prefer header.
 func (c *Client) MailDelta(ctx context.Context, pageURL string) (MailDeltaResult, error) {
 	if strings.TrimSpace(pageURL) == "" {
 		query := url.Values{}
-		query.Set("$top", fmt.Sprint(mailTop))
 		query.Set("$select", mailSelect)
 		pageURL = mailDeltaPath + "?" + query.Encode()
 	}
 
 	var page mailPage
-	if err := c.get(ctx, pageURL, &page); err != nil {
+	if err := c.getWithPrefer(ctx, pageURL, mailPagePrefer, &page); err != nil {
 		if errors.Is(err, ErrGone) {
 			return MailDeltaResult{Restart: true}, nil
 		}
@@ -92,6 +101,12 @@ func (c *Client) MailDelta(ctx context.Context, pageURL string) (MailDeltaResult
 		DeltaLink: page.DeltaLink,
 	}
 	for _, m := range page.Value {
+		if m.Removed != nil {
+			if m.ID != "" {
+				res.Deleted = append(res.Deleted, m.ID)
+			}
+			continue
+		}
 		res.Messages = append(res.Messages, m.toMessage())
 	}
 	return res, nil

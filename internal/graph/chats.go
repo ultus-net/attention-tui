@@ -159,13 +159,53 @@ func (m messageJSON) toMessage(chatID string) Message {
 	}
 }
 
-// ChatMemberNames lists member display names, skipping blanks. 1:1 chats carry
-// no topic, so this is how they get a readable name.
+// User is the signed-in account, reduced to what chat naming needs.
+type User struct {
+	ID          string
+	DisplayName string
+}
+
+// Me fetches the signed-in user.
+func (c *Client) Me(ctx context.Context) (User, error) {
+	var raw struct {
+		ID          string `json:"id"`
+		DisplayName string `json:"displayName"`
+	}
+	if err := c.get(ctx, "me?$select=id,displayName", &raw); err != nil {
+		return User{}, fmt.Errorf("graph: me: %w", err)
+	}
+	return User{ID: raw.ID, DisplayName: strings.TrimSpace(raw.DisplayName)}, nil
+}
+
+// signedInUserID caches the caller's object id. A failure is not cached, so a
+// transient network error cannot poison naming until restart.
+func (c *Client) signedInUserID(ctx context.Context) (string, error) {
+	c.selfMu.Lock()
+	defer c.selfMu.Unlock()
+	if c.selfUserID != "" {
+		return c.selfUserID, nil
+	}
+	me, err := c.Me(ctx)
+	if err != nil {
+		return "", err
+	}
+	c.selfUserID = me.ID
+	return c.selfUserID, nil
+}
+
+// ChatMemberNames lists member display names, skipping blanks and the
+// signed-in user. 1:1 chats carry no topic, so this is how they get the other
+// participant's name rather than "you, them".
 func (c *Client) ChatMemberNames(ctx context.Context, chatID string) ([]string, error) {
+	self, err := c.signedInUserID(ctx)
+	if err != nil {
+		return nil, err
+	}
 	pageURL := fmt.Sprintf("me/chats/%s/members", url.PathEscape(chatID))
 
 	var page struct {
 		Value []struct {
+			UserID      string `json:"userId"`
 			DisplayName string `json:"displayName"`
 		} `json:"value"`
 	}
@@ -174,6 +214,9 @@ func (c *Client) ChatMemberNames(ctx context.Context, chatID string) ([]string, 
 	}
 	names := make([]string, 0, len(page.Value))
 	for _, m := range page.Value {
+		if self != "" && m.UserID == self {
+			continue
+		}
 		if name := strings.TrimSpace(m.DisplayName); name != "" {
 			names = append(names, name)
 		}

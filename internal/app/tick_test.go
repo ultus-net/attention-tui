@@ -384,4 +384,69 @@ func TestBackoffGrows(t *testing.T) {
 	}
 }
 
+func TestChatMentionOnlyCountsUnreadMessages(t *testing.T) {
+	now := time.Now()
+	src := &fakeSource{
+		chatsFn: func(context.Context, string) ([]graph.Chat, string, error) {
+			return []graph.Chat{unreadChat()}, "", nil
+		},
+		messages: map[string][]graph.Message{"19:abc": {
+			{ID: "new", ChatID: "19:abc", Sender: "Ana", Body: "plain reply", Created: now},
+			{ID: "old", ChatID: "19:abc", Sender: "Ben", Body: "hey @you", Created: now.Add(-2 * time.Hour), Mention: true},
+		}},
+	}
+	r, st := newRunner(t, testConfig(t), src)
+
+	if _, err := r.Tick(context.Background()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	items, err := st.Items(context.Background())
+	if err != nil {
+		t.Fatalf("Items: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("items = %d, want 1", len(items))
+	}
+	if items[0].Mention {
+		t.Fatal("a mention on an already-read message must not flag the chat")
+	}
+	if items[0].From != "Ana" || items[0].Preview != "plain reply" {
+		t.Fatalf("item = %+v, want the unread message", items[0])
+	}
+}
+
+func TestRemovedMailLeavesTheCache(t *testing.T) {
+	now := time.Now()
+	src := &fakeSource{
+		mailFn: func(_ context.Context, url string) (graph.MailDeltaResult, error) {
+			if url == "" {
+				return graph.MailDeltaResult{
+					Messages:  []graph.MailMessage{{ID: "m1", Received: now}},
+					DeltaLink: "delta-1",
+				}, nil
+			}
+			return graph.MailDeltaResult{Deleted: []string{"m1"}, DeltaLink: "delta-2"}, nil
+		},
+	}
+	r, st := newRunner(t, testConfig(t), src)
+	ctx := context.Background()
+	if _, err := st.UpsertItems(ctx, []rules.Item{{Source: "mail", ID: "m1", Received: now}}); err != nil {
+		t.Fatalf("UpsertItems: %v", err)
+	}
+	if err := st.SetKV(ctx, mailDeltaKey, "delta-1"); err != nil {
+		t.Fatalf("SetKV: %v", err)
+	}
+
+	if _, err := r.Tick(ctx); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	items, err := st.Items(ctx)
+	if err != nil {
+		t.Fatalf("Items: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("items = %+v, want the removed message gone", items)
+	}
+}
+
 var _ = rules.Item{}

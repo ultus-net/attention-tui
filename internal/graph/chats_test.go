@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -157,9 +158,22 @@ func TestChatMessagesDefaultTop(t *testing.T) {
 	}
 }
 
-func TestMemberNamesSkipEmpty(t *testing.T) {
-	body := `{"value": [{"displayName": "Ana"}, {"displayName": ""}, {"displayName": "Ben"}]}`
-	srv := jsonServer(t, body)
+func TestMemberNamesSkipEmptyAndSelf(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/me":
+			w.Write([]byte(`{"id": "self-id", "displayName": "Me"}`))
+		default:
+			w.Write([]byte(`{"value": [
+				{"userId": "ana-id", "displayName": "Ana"},
+				{"userId": "self-id", "displayName": "Me"},
+				{"userId": "empty-id", "displayName": ""},
+				{"userId": "ben-id", "displayName": "Ben"}
+			]}`))
+		}
+	}))
+	defer srv.Close()
 	c := New(srv.URL, &fakeTokens{})
 
 	names, err := c.ChatMemberNames(context.Background(), "19:abc")
@@ -167,7 +181,31 @@ func TestMemberNamesSkipEmpty(t *testing.T) {
 		t.Fatalf("ChatMemberNames: %v", err)
 	}
 	if len(names) != 2 || names[0] != "Ana" || names[1] != "Ben" {
-		t.Fatalf("names = %v", names)
+		t.Fatalf("names = %v, want the other participants", names)
+	}
+}
+
+func TestMeIsFetchedOnce(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/me" {
+			atomic.AddInt32(&calls, 1)
+			w.Write([]byte(`{"id": "self-id", "displayName": "Me"}`))
+			return
+		}
+		w.Write([]byte(`{"value": [{"userId": "ben-id", "displayName": "Ben"}]}`))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, &fakeTokens{})
+
+	for i := 0; i < 2; i++ {
+		if _, err := c.ChatMemberNames(context.Background(), "19:abc"); err != nil {
+			t.Fatalf("ChatMemberNames: %v", err)
+		}
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("/me calls = %d, want 1", got)
 	}
 }
 

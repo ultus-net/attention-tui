@@ -182,6 +182,85 @@ func TestRetryAfterHTTPDate(t *testing.T) {
 	}
 }
 
+func TestResolveRejectsForeignOrigin(t *testing.T) {
+	c := New("https://graph.microsoft.com/v1.0", &fakeTokens{})
+	for _, raw := range []string{
+		"https://evil.example/v1.0/me/messages",
+		"http://graph.microsoft.com/v1.0/me/messages",
+		"https://graph.microsoft.com:8443/v1.0/me/messages",
+		"//evil.example/v1.0/me/messages",
+		"https://user@graph.microsoft.com/v1.0/me",
+	} {
+		if _, err := c.resolve(raw); !errors.Is(err, ErrUntrustedHost) {
+			t.Errorf("resolve(%q) error = %v, want ErrUntrustedHost", raw, err)
+		}
+	}
+}
+
+func TestResolveKeepsBaseOriginURLByteForByte(t *testing.T) {
+	c := New("https://graph.microsoft.com/v1.0", &fakeTokens{})
+	raw := "https://graph.microsoft.com/v1.0/me/chats?$skiptoken=a%2Fb%24c"
+	got, err := c.resolve(raw)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if got != raw {
+		t.Fatalf("resolve = %q, want the link verbatim", got)
+	}
+}
+
+func TestResolveJoinsRelativePath(t *testing.T) {
+	c := New("https://graph.microsoft.com/v1.0", &fakeTokens{})
+	got, err := c.resolve("/me/chats?$top=50")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if got != "https://graph.microsoft.com/v1.0/me/chats?$top=50" {
+		t.Fatalf("resolve = %q", got)
+	}
+}
+
+func TestGetDoesNotSendTokenToForeignHost(t *testing.T) {
+	var hits atomic.Int32
+	evil := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Write([]byte(`{}`))
+	}))
+	defer evil.Close()
+
+	home := New("https://graph.microsoft.com/v1.0", &fakeTokens{})
+	err := home.get(context.Background(), evil.URL+"/v1.0/me/messages", nil)
+	if !errors.Is(err, ErrUntrustedHost) {
+		t.Fatalf("err = %v, want ErrUntrustedHost", err)
+	}
+	if got := hits.Load(); got != 0 {
+		t.Fatalf("foreign host received %d requests, want 0", got)
+	}
+}
+
+func TestRedirectToForeignHostIsRefused(t *testing.T) {
+	var hits atomic.Int32
+	evil := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Write([]byte(`{}`))
+	}))
+	defer evil.Close()
+
+	home := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, evil.URL+"/v1.0/me/messages", http.StatusTemporaryRedirect)
+	}))
+	defer home.Close()
+
+	c := New(home.URL, &fakeTokens{})
+	err := c.get(context.Background(), "me/messages", nil)
+	if !errors.Is(err, ErrUntrustedHost) {
+		t.Fatalf("err = %v, want ErrUntrustedHost", err)
+	}
+	if got := hits.Load(); got != 0 {
+		t.Fatalf("foreign host received %d requests, want 0", got)
+	}
+}
+
 func TestRetryBudgetExhausted(t *testing.T) {
 	var requests atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

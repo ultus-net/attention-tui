@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -28,6 +30,9 @@ var (
 	ErrUnauthorized = errors.New("graph: unauthorized")
 	// ErrGone means a delta link expired and the caller must restart the walk.
 	ErrGone = errors.New("graph: gone")
+	// ErrUntrustedHost means a request URL would send the bearer token to a
+	// host or scheme other than the configured Graph origin.
+	ErrUntrustedHost = errors.New("graph: untrusted request host")
 )
 
 // TokenSource supplies a bearer token. Implementations should return the
@@ -47,6 +52,9 @@ type Client struct {
 	baseURL string
 	tokens  TokenSource
 	http    *http.Client
+
+	selfMu     sync.Mutex
+	selfUserID string
 }
 
 // New builds a client. An empty baseURL means the public Graph endpoint.
@@ -57,13 +65,41 @@ func New(baseURL string, ts TokenSource) *Client {
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		tokens:  ts,
-		http:    &http.Client{Timeout: 60 * time.Second},
+		http: &http.Client{
+			Timeout:       60 * time.Second,
+			CheckRedirect: checkRedirect,
+		},
 	}
+}
+
+// checkRedirect refuses to carry a request, and its bearer token, to another
+// origin. Graph answers with a same-origin redirect or none at all.
+func checkRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("graph: stopped after 10 redirects")
+	}
+	if len(via) == 0 {
+		return nil
+	}
+	if !sameOrigin(via[0].URL, req.URL) {
+		return ErrUntrustedHost
+	}
+	return nil
 }
 
 // get performs a GET and decodes the JSON body into out. It retries 429 and
 // 5xx twice, honours Retry-After, and refreshes the token once on a 401.
 func (c *Client) get(ctx context.Context, url string, out any) error {
+	return c.getWithPrefer(ctx, url, "", out)
+}
+
+// getWithPrefer is get plus one Prefer header value. Graph needs it on
+// endpoints that ignore $top, such as the mail delta.
+func (c *Client) getWithPrefer(ctx context.Context, url, prefer string, out any) error {
+	endpoint, err := c.resolve(url)
+	if err != nil {
+		return err
+	}
 	token, err := c.tokens.Token(ctx)
 	if err != nil {
 		return fmt.Errorf("graph: acquire token: %w", err)
@@ -75,7 +111,7 @@ func (c *Client) get(ctx context.Context, url string, out any) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		resp, err := c.do(ctx, c.resolve(url), token)
+		resp, err := c.do(ctx, endpoint, prefer, token)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
@@ -118,13 +154,16 @@ func (c *Client) get(ctx context.Context, url string, out any) error {
 	}
 }
 
-func (c *Client) do(ctx context.Context, url, token string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func (c *Client) do(ctx context.Context, endpoint, prefer, token string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
+	if prefer != "" {
+		req.Header.Set("Prefer", prefer)
+	}
 	return c.http.Do(req)
 }
 
@@ -135,11 +174,55 @@ func (c *Client) forceToken(ctx context.Context) (string, error) {
 	return c.tokens.Token(ctx)
 }
 
-func (c *Client) resolve(url string) string {
-	if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
-		return url
+// resolve turns a Graph path or continuation link into an absolute URL. An
+// absolute URL must stay on the configured origin, because the bearer token
+// goes with it. A nextLink from a compromised or spoofed response cannot move
+// the token to another host.
+func (c *Client) resolve(raw string) (string, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("graph: invalid request url: %w", err)
 	}
-	return c.baseURL + "/" + strings.TrimLeft(url, "/")
+	if parsed.IsAbs() {
+		if parsed.User != nil || !c.originAllowed(parsed) {
+			return "", ErrUntrustedHost
+		}
+		return raw, nil
+	}
+	if parsed.Scheme != "" || parsed.Host != "" || parsed.User != nil || strings.HasPrefix(raw, "//") {
+		return "", ErrUntrustedHost
+	}
+	return c.baseURL + "/" + strings.TrimLeft(raw, "/"), nil
+}
+
+// originAllowed reports whether an absolute URL matches the base origin.
+func (c *Client) originAllowed(u *url.URL) bool {
+	base, err := url.Parse(c.baseURL)
+	if err != nil {
+		return false
+	}
+	return sameOrigin(base, u)
+}
+
+// sameOrigin compares scheme, host, and effective port.
+func sameOrigin(a, b *url.URL) bool {
+	return strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		effectivePort(a) == effectivePort(b)
+}
+
+func effectivePort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
+	}
 }
 
 func decode(body io.Reader, out any) error {

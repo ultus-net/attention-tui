@@ -99,7 +99,7 @@ func (r *Runner) tick(ctx context.Context) (TickResult, error) {
 	now := time.Now()
 	res := TickResult{}
 
-	mails, deltaLink, backfill, err := r.fetchMail(ctx)
+	mails, removed, deltaLink, backfill, err := r.fetchMail(ctx)
 	if err != nil {
 		return res, err
 	}
@@ -132,6 +132,11 @@ func (r *Runner) tick(ctx context.Context) (TickResult, error) {
 		if err := r.store.SetSeen(ctx, it.Source, it.ID); err != nil {
 			return res, err
 		}
+	}
+	// A message that left the inbox is gone from the pane now, not when the
+	// retention window expires.
+	if _, err := r.store.DeleteItems(ctx, "mail", removed); err != nil {
+		return res, err
 	}
 
 	chats, err := r.fetchChats(ctx)
@@ -205,10 +210,10 @@ func (r *Runner) pendingAlerts(ctx context.Context) ([]rules.Item, error) {
 	return out, nil
 }
 
-func (r *Runner) fetchMail(ctx context.Context) ([]graph.MailMessage, string, bool, error) {
+func (r *Runner) fetchMail(ctx context.Context) ([]graph.MailMessage, []string, string, bool, error) {
 	link, ok, err := r.store.KV(ctx, mailDeltaKey)
 	if err != nil {
-		return nil, "", false, err
+		return nil, nil, "", false, err
 	}
 	backfill := !ok || strings.TrimSpace(link) == ""
 	pageURL := link
@@ -217,16 +222,17 @@ func (r *Runner) fetchMail(ctx context.Context) ([]graph.MailMessage, string, bo
 	}
 
 	var collected []graph.MailMessage
+	var removed []string
 	deltaLink := ""
 	restarted := false
 	for page := 0; page < mailMaxPages; page++ {
 		res, err := r.source.MailDelta(ctx, pageURL)
 		if err != nil {
-			return nil, "", backfill, fmt.Errorf("app: mail delta: %w", err)
+			return nil, nil, "", backfill, fmt.Errorf("app: mail delta: %w", err)
 		}
 		if res.Restart {
 			if restarted {
-				return nil, "", backfill, fmt.Errorf("app: mail delta restarted twice in one tick")
+				return nil, nil, "", backfill, fmt.Errorf("app: mail delta restarted twice in one tick")
 			}
 			restarted = true
 			backfill = true
@@ -235,6 +241,7 @@ func (r *Runner) fetchMail(ctx context.Context) ([]graph.MailMessage, string, bo
 			continue
 		}
 		collected = append(collected, res.Messages...)
+		removed = append(removed, res.Deleted...)
 		if res.DeltaLink != "" {
 			deltaLink = res.DeltaLink
 		}
@@ -243,7 +250,7 @@ func (r *Runner) fetchMail(ctx context.Context) ([]graph.MailMessage, string, bo
 		}
 		pageURL = res.NextLink
 	}
-	return r.boundMail(collected, backfill), deltaLink, backfill, nil
+	return r.boundMail(collected, backfill), removed, deltaLink, backfill, nil
 }
 
 func (r *Runner) boundMail(msgs []graph.MailMessage, backfill bool) []graph.MailMessage {
@@ -299,11 +306,16 @@ func (r *Runner) chatItem(ctx context.Context, ch graph.Chat, msgs []graph.Messa
 	var newest *graph.Message
 	mention := false
 	for i := range msgs {
+		// Only unread messages may flag the row. A mention in a message the
+		// user already read must not keep the chat in the alert tier.
+		if !msgs[i].Created.After(read) {
+			continue
+		}
+		if newest == nil {
+			newest = &msgs[i]
+		}
 		if msgs[i].Mention {
 			mention = true
-		}
-		if newest == nil && msgs[i].Created.After(read) {
-			newest = &msgs[i]
 		}
 	}
 	if newest == nil && len(msgs) > 0 {

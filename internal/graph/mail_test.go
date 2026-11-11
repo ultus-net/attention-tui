@@ -118,9 +118,10 @@ func TestFlattenCollapsesWhitespace(t *testing.T) {
 }
 
 func TestMailDeltaSelectsOnlyNeededFields(t *testing.T) {
-	var rawQuery string
+	var rawQuery, prefer string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rawQuery = r.URL.RawQuery
+		prefer = r.Header.Get("Prefer")
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"value": []}`))
 	}))
@@ -144,8 +145,37 @@ func TestMailDeltaSelectsOnlyNeededFields(t *testing.T) {
 			t.Fatalf("$select %q is missing %s", selectValue, field)
 		}
 	}
-	if !strings.Contains(rawQuery, "$top=50") && !strings.Contains(rawQuery, "%24top=50") {
-		t.Fatalf("query %q should cap $top at 50", rawQuery)
+	if strings.Contains(rawQuery, "top=") || strings.Contains(rawQuery, "%24top=") {
+		t.Fatalf("query %q still sends $top, which the mail delta ignores", rawQuery)
+	}
+	if !strings.Contains(prefer, "odata.maxpagesize=1000") {
+		t.Fatalf("Prefer = %q, want odata.maxpagesize=1000", prefer)
+	}
+	if !strings.Contains(prefer, `IdType="ImmutableId"`) {
+		t.Fatalf("Prefer = %q, want immutable ids", prefer)
+	}
+}
+
+func TestMailDeltaReportsRemovedItems(t *testing.T) {
+	body := `{
+		"value": [
+			{"id": "m1", "subject": "kept", "receivedDateTime": "2026-01-02T03:04:05Z"},
+			{"id": "m2", "@removed": {"reason": "deleted"}}
+		],
+		"@odata.deltaLink": "https://graph.example/delta?token=2"
+	}`
+	srv := mailServer(t, body)
+	c := New(srv.URL, &fakeTokens{})
+
+	res, err := c.MailDelta(context.Background(), "")
+	if err != nil {
+		t.Fatalf("MailDelta: %v", err)
+	}
+	if len(res.Messages) != 1 || res.Messages[0].ID != "m1" {
+		t.Fatalf("messages = %+v, want only m1", res.Messages)
+	}
+	if len(res.Deleted) != 1 || res.Deleted[0] != "m2" {
+		t.Fatalf("deleted = %v, want m2", res.Deleted)
 	}
 }
 

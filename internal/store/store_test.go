@@ -318,6 +318,34 @@ func TestChatWatermark(t *testing.T) {
 	}
 }
 
+func TestDeleteItemsRemovesOnlyMatchingRows(t *testing.T) {
+	s, _ := open(t)
+	ctx := context.Background()
+	if _, err := s.UpsertItems(ctx, []rules.Item{mailItem("m1", "one"), mailItem("m2", "two"), chatItem("c1")}); err != nil {
+		t.Fatalf("UpsertItems: %v", err)
+	}
+
+	deleted, err := s.DeleteItems(ctx, "mail", []string{"m1", "missing"})
+	if err != nil {
+		t.Fatalf("DeleteItems: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted = %d, want 1", deleted)
+	}
+	items, err := s.Items(ctx)
+	if err != nil {
+		t.Fatalf("Items: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("items = %+v, want m2 and c1", items)
+	}
+	for _, it := range items {
+		if it.Source == "mail" && it.ID == "m1" {
+			t.Fatal("m1 survived the delete")
+		}
+	}
+}
+
 func TestChatName(t *testing.T) {
 	s, _ := open(t)
 	ctx := context.Background()

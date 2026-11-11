@@ -129,6 +129,75 @@ func TestTickFetchesMailAndChats(t *testing.T) {
 	if len(items) != 2 {
 		t.Fatalf("items = %d, want 2", len(items))
 	}
+	link, ok, err := st.KV(context.Background(), mailDeltaKey)
+	if err != nil {
+		t.Fatalf("KV: %v", err)
+	}
+	if !ok || link != "delta-1" {
+		t.Fatalf("delta link = %q, %v", link, ok)
+	}
+}
+
+func TestDeltaLinkNotSavedWhenTickFails(t *testing.T) {
+	src := &fakeSource{
+		mailFn: func(context.Context, string) (graph.MailDeltaResult, error) {
+			return graph.MailDeltaResult{
+				Messages:  []graph.MailMessage{{ID: "m1", Received: time.Now()}},
+				DeltaLink: "delta-1",
+			}, nil
+		},
+		chatsFn: func(context.Context, string) ([]graph.Chat, string, error) {
+			return nil, "", errors.New("chats down")
+		},
+	}
+	r, st := newRunner(t, testConfig(t), src)
+
+	if _, err := r.Tick(context.Background()); err == nil {
+		t.Fatal("expected the chat failure to fail the tick")
+	}
+	if _, ok, err := st.KV(context.Background(), mailDeltaKey); err != nil {
+		t.Fatalf("KV: %v", err)
+	} else if ok {
+		t.Fatal("the delta link advanced before the tick committed, so a failure would skip messages")
+	}
+}
+
+func TestOnlyAlertRowsAreStamped(t *testing.T) {
+	now := time.Now()
+	src := &fakeSource{
+		mailFn: func(context.Context, string) (graph.MailDeltaResult, error) {
+			return graph.MailDeltaResult{
+				Messages: []graph.MailMessage{
+					{ID: "urgent", Subject: "urgent thing", Received: now},
+					{ID: "routine", Subject: "routine thing", Received: now},
+				},
+				DeltaLink: "delta-1",
+			}, nil
+		},
+	}
+	cfg := testConfig(t)
+	cfg.Rules = []config.Rule{
+		{Name: "urgent", Match: config.Match{Subject: "urgent"}, Tier: "alert"},
+	}
+	r, st := newRunner(t, cfg, src)
+	if err := st.SetKV(context.Background(), mailDeltaKey, "delta-0"); err != nil {
+		t.Fatalf("SetKV: %v", err)
+	}
+
+	res, err := r.Tick(context.Background())
+	if err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if len(res.Alerts) != 1 || res.Alerts[0].ID != "urgent" {
+		t.Fatalf("alerts = %+v, want only the urgent mail", res.Alerts)
+	}
+	pending, err := st.PendingNotifications(context.Background(), time.Hour)
+	if err != nil {
+		t.Fatalf("PendingNotifications: %v", err)
+	}
+	if len(pending) != 1 || pending[0].ID != "routine" {
+		t.Fatalf("pending = %+v, want the non-alert row still unstamped", pending)
+	}
 }
 
 func TestChatCollapsesToOneItem(t *testing.T) {

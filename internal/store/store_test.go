@@ -81,8 +81,12 @@ func TestEditKeepsSeenAndNotified(t *testing.T) {
 	if _, err := s.UpsertItems(ctx, []rules.Item{it}); err != nil {
 		t.Fatalf("UpsertItems: %v", err)
 	}
-	if _, err := s.PendingNotifications(ctx, time.Hour); err != nil {
+	pending, err := s.PendingNotifications(ctx, time.Hour)
+	if err != nil {
 		t.Fatalf("PendingNotifications: %v", err)
+	}
+	if err := s.MarkNotified(ctx, pending); err != nil {
+		t.Fatalf("MarkNotified: %v", err)
 	}
 	if err := s.SetSeen(ctx, it.Source, it.ID); err != nil {
 		t.Fatalf("SetSeen: %v", err)
@@ -148,12 +152,63 @@ func TestPendingNotificationsOnce(t *testing.T) {
 	if len(first) != 1 {
 		t.Fatalf("first call = %d items, want 1", len(first))
 	}
+	again, err := s.PendingNotifications(ctx, time.Hour)
+	if err != nil {
+		t.Fatalf("PendingNotifications: %v", err)
+	}
+	if len(again) != 1 {
+		t.Fatalf("selection alone must not stamp: got %d items", len(again))
+	}
+	if err := s.MarkNotified(ctx, first); err != nil {
+		t.Fatalf("MarkNotified: %v", err)
+	}
 	second, err := s.PendingNotifications(ctx, time.Hour)
 	if err != nil {
 		t.Fatalf("PendingNotifications: %v", err)
 	}
 	if len(second) != 0 {
-		t.Fatalf("second call = %d items, want 0", len(second))
+		t.Fatalf("after MarkNotified = %d items, want 0", len(second))
+	}
+}
+
+func TestNewerMessageRearms(t *testing.T) {
+	s, _ := open(t)
+	ctx := context.Background()
+	it := chatItem("c1")
+	if _, err := s.UpsertItems(ctx, []rules.Item{it}); err != nil {
+		t.Fatalf("UpsertItems: %v", err)
+	}
+	pending, err := s.PendingNotifications(ctx, time.Hour)
+	if err != nil {
+		t.Fatalf("PendingNotifications: %v", err)
+	}
+	if err := s.MarkNotified(ctx, pending); err != nil {
+		t.Fatalf("MarkNotified: %v", err)
+	}
+	if err := s.SetSeen(ctx, it.Source, it.ID); err != nil {
+		t.Fatalf("SetSeen: %v", err)
+	}
+
+	newer := it
+	newer.Preview = "new message"
+	newer.Received = it.Received.Add(time.Minute)
+	if _, err := s.UpsertItems(ctx, []rules.Item{newer}); err != nil {
+		t.Fatalf("UpsertItems: %v", err)
+	}
+
+	items, err := s.Items(ctx)
+	if err != nil {
+		t.Fatalf("Items: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("items = %d, want the chat to reappear as unseen", len(items))
+	}
+	rearmed, err := s.PendingNotifications(ctx, time.Hour)
+	if err != nil {
+		t.Fatalf("PendingNotifications: %v", err)
+	}
+	if len(rearmed) != 1 {
+		t.Fatalf("pending = %d, want the newer message to be notify-eligible again", len(rearmed))
 	}
 }
 

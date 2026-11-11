@@ -99,7 +99,7 @@ func (r *Runner) tick(ctx context.Context) (TickResult, error) {
 	now := time.Now()
 	res := TickResult{}
 
-	mails, backfill, err := r.fetchMail(ctx)
+	mails, deltaLink, backfill, err := r.fetchMail(ctx)
 	if err != nil {
 		return res, err
 	}
@@ -163,6 +163,14 @@ func (r *Runner) tick(ctx context.Context) (TickResult, error) {
 	}
 	res.NewChats = inserted
 
+	// The delta link advances only after every row from this walk is cached,
+	// so a later failure replays the same delta instead of skipping pages.
+	if deltaLink != "" {
+		if err := r.store.SetKV(ctx, mailDeltaKey, deltaLink); err != nil {
+			return res, err
+		}
+	}
+
 	if _, err := r.store.Prune(ctx, now.AddDate(0, 0, -retentionDays), retentionMax); err != nil {
 		return res, err
 	}
@@ -191,13 +199,16 @@ func (r *Runner) pendingAlerts(ctx context.Context) ([]rules.Item, error) {
 			out = append(out, it)
 		}
 	}
+	if err := r.store.MarkNotified(ctx, out); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
-func (r *Runner) fetchMail(ctx context.Context) ([]graph.MailMessage, bool, error) {
+func (r *Runner) fetchMail(ctx context.Context) ([]graph.MailMessage, string, bool, error) {
 	link, ok, err := r.store.KV(ctx, mailDeltaKey)
 	if err != nil {
-		return nil, false, err
+		return nil, "", false, err
 	}
 	backfill := !ok || strings.TrimSpace(link) == ""
 	pageURL := link
@@ -206,15 +217,16 @@ func (r *Runner) fetchMail(ctx context.Context) ([]graph.MailMessage, bool, erro
 	}
 
 	var collected []graph.MailMessage
+	deltaLink := ""
 	restarted := false
 	for page := 0; page < mailMaxPages; page++ {
 		res, err := r.source.MailDelta(ctx, pageURL)
 		if err != nil {
-			return nil, backfill, fmt.Errorf("app: mail delta: %w", err)
+			return nil, "", backfill, fmt.Errorf("app: mail delta: %w", err)
 		}
 		if res.Restart {
 			if restarted {
-				return nil, backfill, fmt.Errorf("app: mail delta restarted twice in one tick")
+				return nil, "", backfill, fmt.Errorf("app: mail delta restarted twice in one tick")
 			}
 			restarted = true
 			backfill = true
@@ -224,16 +236,14 @@ func (r *Runner) fetchMail(ctx context.Context) ([]graph.MailMessage, bool, erro
 		}
 		collected = append(collected, res.Messages...)
 		if res.DeltaLink != "" {
-			if err := r.store.SetKV(ctx, mailDeltaKey, res.DeltaLink); err != nil {
-				return nil, backfill, err
-			}
+			deltaLink = res.DeltaLink
 		}
 		if strings.TrimSpace(res.NextLink) == "" {
 			break
 		}
 		pageURL = res.NextLink
 	}
-	return r.boundMail(collected, backfill), backfill, nil
+	return r.boundMail(collected, backfill), deltaLink, backfill, nil
 }
 
 func (r *Runner) boundMail(msgs []graph.MailMessage, backfill bool) []graph.MailMessage {

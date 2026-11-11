@@ -121,6 +121,16 @@ func (s *Store) UpsertItems(ctx context.Context, items []rules.Item) (int, error
 	}
 	defer update.Close()
 
+	// A newer message on the same row re-arms it: the row was read and maybe
+	// notified for the previous message, not for this one.
+	rearm, err := tx.PrepareContext(ctx, `UPDATE items
+		SET seen = 0, notified_at = NULL, first_seen = ?
+		WHERE source = ? AND id = ? AND received_at < ?`)
+	if err != nil {
+		return 0, fmt.Errorf("store: prepare rearm: %w", err)
+	}
+	defer rearm.Close()
+
 	now := time.Now().Unix()
 	inserted := 0
 	for _, it := range items {
@@ -137,6 +147,9 @@ func (s *Store) UpsertItems(ctx context.Context, items []rules.Item) (int, error
 			return 0, fmt.Errorf("store: insert %s/%s: %w", it.Source, it.ID, err)
 		}
 		if n == 0 {
+			if _, err := rearm.ExecContext(ctx, now, it.Source, it.ID, it.Received.Unix()); err != nil {
+				return 0, fmt.Errorf("store: rearm %s/%s: %w", it.Source, it.ID, err)
+			}
 			_, err = update.ExecContext(ctx,
 				it.ChatID, it.ChatName, it.From, it.Subject, it.Preview,
 				it.Importance, it.URL, it.Received.Unix(),
@@ -178,19 +191,12 @@ func (s *Store) SetSeen(ctx context.Context, source, id string) error {
 }
 
 // PendingNotifications returns unseen rows first seen inside window that have
-// never notified, and stamps notified_at in the same transaction so a crash
-// cannot double-notify.
+// never notified. It only selects; the caller decides which are alert-tier and
+// stamps them with MarkNotified.
 func (s *Store) PendingNotifications(ctx context.Context, window time.Duration) ([]rules.Item, error) {
-	now := time.Now()
-	cutoff := now.Add(-window).Unix()
+	cutoff := time.Now().Add(-window).Unix()
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("store: begin notifications: %w", err)
-	}
-	defer tx.Rollback()
-
-	rows, err := tx.QueryContext(ctx, `SELECT
+	rows, err := s.db.QueryContext(ctx, `SELECT
 		source, id, chat_id, chat_name, sender, subject, preview, importance,
 		url, received_at, focused, flagged, mention, seen
 		FROM items
@@ -199,28 +205,36 @@ func (s *Store) PendingNotifications(ctx context.Context, window time.Duration) 
 	if err != nil {
 		return nil, fmt.Errorf("store: list notifications: %w", err)
 	}
-	items, err := scanItems(rows)
-	rows.Close()
-	if err != nil {
-		return nil, err
-	}
+	defer rows.Close()
+	return scanItems(rows)
+}
+
+// MarkNotified stamps rows as notified in one transaction, so a crash cannot
+// double-notify the same item.
+func (s *Store) MarkNotified(ctx context.Context, items []rules.Item) error {
 	if len(items) == 0 {
-		return nil, nil
+		return nil
 	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: begin mark notified: %w", err)
+	}
+	defer tx.Rollback()
 	stamp, err := tx.PrepareContext(ctx, `UPDATE items SET notified_at = ? WHERE source = ? AND id = ?`)
 	if err != nil {
-		return nil, fmt.Errorf("store: prepare notify stamp: %w", err)
+		return fmt.Errorf("store: prepare notify stamp: %w", err)
 	}
 	defer stamp.Close()
+	now := time.Now().Unix()
 	for _, it := range items {
-		if _, err := stamp.ExecContext(ctx, now.Unix(), it.Source, it.ID); err != nil {
-			return nil, fmt.Errorf("store: stamp %s/%s: %w", it.Source, it.ID, err)
+		if _, err := stamp.ExecContext(ctx, now, it.Source, it.ID); err != nil {
+			return fmt.Errorf("store: stamp %s/%s: %w", it.Source, it.ID, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("store: commit notifications: %w", err)
+		return fmt.Errorf("store: commit mark notified: %w", err)
 	}
-	return items, nil
+	return nil
 }
 
 // Prune drops rows older than olderThan, then caps the table at max rows.

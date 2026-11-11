@@ -102,6 +102,8 @@ func (c *Client) MailDelta(ctx context.Context, pageURL string) (MailDeltaResult
 	}
 	for _, m := range page.Value {
 		if m.Removed != nil {
+			// Graph always sends the id on a removal. Without one there is no
+			// row to identify, so the entry is dropped rather than guessing.
 			if m.ID != "" {
 				res.Deleted = append(res.Deleted, m.ID)
 			}

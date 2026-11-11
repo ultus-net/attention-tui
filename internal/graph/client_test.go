@@ -261,6 +261,34 @@ func TestRedirectToForeignHostIsRefused(t *testing.T) {
 	}
 }
 
+func TestSameOriginRedirectIsFollowed(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/me/test" {
+			http.Redirect(w, r, "/me/other", http.StatusFound)
+			return
+		}
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"value":"ok"}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, &fakeTokens{})
+	var out struct {
+		Value string `json:"value"`
+	}
+	if err := c.get(context.Background(), "me/test", &out); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if out.Value != "ok" {
+		t.Fatalf("value = %q, want ok", out.Value)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("followed request count = %d, want 1", got)
+	}
+}
+
 func TestRetryBudgetExhausted(t *testing.T) {
 	var requests atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

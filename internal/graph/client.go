@@ -81,7 +81,9 @@ func checkRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) == 0 {
 		return nil
 	}
-	if !sameOrigin(via[0].URL, req.URL) {
+	// Every hop must stay on the original origin. Checking the immediate
+	// predecessor as well keeps the rule independent of how the chain was built.
+	if !sameOrigin(via[0].URL, req.URL) || !sameOrigin(via[len(via)-1].URL, req.URL) {
 		return ErrUntrustedHost
 	}
 	return nil
@@ -176,8 +178,10 @@ func (c *Client) forceToken(ctx context.Context) (string, error) {
 
 // resolve turns a Graph path or continuation link into an absolute URL. An
 // absolute URL must stay on the configured origin, because the bearer token
-// goes with it. A nextLink from a compromised or spoofed response cannot move
-// the token to another host.
+// goes with it. The origin is scheme, host, and port; the base path is not
+// part of the trust decision, because Graph continuation links may point at
+// any path on the same service. A nextLink from a compromised or spoofed
+// response cannot move the token to another host.
 func (c *Client) resolve(raw string) (string, error) {
 	parsed, err := url.Parse(raw)
 	if err != nil {

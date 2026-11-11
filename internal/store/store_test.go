@@ -325,12 +325,12 @@ func TestDeleteItemsRemovesOnlyMatchingRows(t *testing.T) {
 		t.Fatalf("UpsertItems: %v", err)
 	}
 
-	deleted, err := s.DeleteItems(ctx, "mail", []string{"m1", "missing"})
+	deleted, err := s.DeleteItems(ctx, "mail", []string{"m1", "m1", "missing"})
 	if err != nil {
 		t.Fatalf("DeleteItems: %v", err)
 	}
 	if deleted != 1 {
-		t.Fatalf("deleted = %d, want 1", deleted)
+		t.Fatalf("deleted = %d, want 1 and no repeat work on a duplicate id", deleted)
 	}
 	items, err := s.Items(ctx)
 	if err != nil {

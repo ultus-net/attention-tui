@@ -179,6 +179,20 @@ func TestMailDeltaReportsRemovedItems(t *testing.T) {
 	}
 }
 
+func TestMailDeltaIgnoresRemovalWithoutID(t *testing.T) {
+	body := `{"value": [{"@removed": {"reason": "deleted"}}]}`
+	srv := mailServer(t, body)
+	c := New(srv.URL, &fakeTokens{})
+
+	res, err := c.MailDelta(context.Background(), "")
+	if err != nil {
+		t.Fatalf("MailDelta: %v", err)
+	}
+	if len(res.Deleted) != 0 {
+		t.Fatalf("deleted = %v, want no id and so no delete", res.Deleted)
+	}
+}
+
 func TestMailDeltaWrapsErrors(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)

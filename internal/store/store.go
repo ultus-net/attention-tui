@@ -207,7 +207,12 @@ func (s *Store) DeleteItems(ctx context.Context, source string, ids []string) (i
 	}
 	defer del.Close()
 	deleted := 0
+	seen := make(map[string]struct{}, len(ids))
 	for _, id := range ids {
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
 		res, err := del.ExecContext(ctx, source, id)
 		if err != nil {
 			return 0, fmt.Errorf("store: delete %s/%s: %w", source, id, err)

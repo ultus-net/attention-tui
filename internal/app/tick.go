@@ -51,6 +51,10 @@ type Runner struct {
 	engine *rules.Engine
 	err    error
 
+	// deleteItems removes rows the source reported as gone. Tests replace it
+	// to prove a failed delete cannot advance the mail delta link.
+	deleteItems func(ctx context.Context, source string, ids []string) (int, error)
+
 	ticks    int
 	failures int
 	backoff  time.Duration
@@ -60,7 +64,14 @@ type Runner struct {
 // the first Tick rather than dropped.
 func NewRunner(cfg *config.Config, st *store.Store, src Source) *Runner {
 	engine, err := rules.New(cfg)
-	return &Runner{cfg: cfg, store: st, source: src, engine: engine, err: err}
+	return &Runner{
+		cfg:         cfg,
+		store:       st,
+		source:      src,
+		engine:      engine,
+		err:         err,
+		deleteItems: st.DeleteItems,
+	}
 }
 
 // Backoff is how long the process should wait before the next tick.
@@ -135,7 +146,7 @@ func (r *Runner) tick(ctx context.Context) (TickResult, error) {
 	}
 	// A message that left the inbox is gone from the pane now, not when the
 	// retention window expires.
-	if _, err := r.store.DeleteItems(ctx, "mail", removed); err != nil {
+	if _, err := r.deleteItems(ctx, "mail", removed); err != nil {
 		return res, err
 	}
 

@@ -449,4 +449,31 @@ func TestRemovedMailLeavesTheCache(t *testing.T) {
 	}
 }
 
+func TestDeltaLinkNotSavedWhenDeleteFails(t *testing.T) {
+	src := &fakeSource{
+		mailFn: func(context.Context, string) (graph.MailDeltaResult, error) {
+			return graph.MailDeltaResult{Deleted: []string{"m1"}, DeltaLink: "delta-2"}, nil
+		},
+	}
+	r, st := newRunner(t, testConfig(t), src)
+	ctx := context.Background()
+	if err := st.SetKV(ctx, mailDeltaKey, "delta-1"); err != nil {
+		t.Fatalf("SetKV: %v", err)
+	}
+	r.deleteItems = func(context.Context, string, []string) (int, error) {
+		return 0, errors.New("delete down")
+	}
+
+	if _, err := r.Tick(ctx); err == nil {
+		t.Fatal("expected the delete failure to fail the tick")
+	}
+	link, ok, err := st.KV(ctx, mailDeltaKey)
+	if err != nil {
+		t.Fatalf("KV: %v", err)
+	}
+	if !ok || link != "delta-1" {
+		t.Fatalf("delta link = %q, %v; want the old link so the removal replays", link, ok)
+	}
+}
+
 var _ = rules.Item{}

@@ -125,6 +125,25 @@ func TestOnceWithUnauthenticatedReturnsBanner(t *testing.T) {
 	}
 }
 
+func TestBannerForAuthErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"no token", auth.ErrNoToken, "auth: no token; run attention-tui --login"},
+		{"claims", auth.ErrInteractionRequired, "auth: sign-in required; run attention-tui --login"},
+		{"wrapped claims", errors.Join(errors.New("graph: refresh after 401"), auth.ErrInteractionRequired), "auth: sign-in required; run attention-tui --login"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := bannerFor(tc.err); got != tc.want {
+				t.Fatalf("bannerFor = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRunOnceWritesBlock(t *testing.T) {
 	cfgPath, dataDir := setup(t)
 	seedToken(t, dataDir)

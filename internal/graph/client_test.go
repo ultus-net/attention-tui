@@ -327,6 +327,18 @@ func TestClaimsChallengeIgnoresMalformedValue(t *testing.T) {
 	}
 }
 
+func TestClaimsChallengeSkipsOtherChallenges(t *testing.T) {
+	claims := `{"access_token":{"nbf":{"essential":true,"value":"1"}}}`
+	encoded := base64.RawURLEncoding.EncodeToString([]byte(claims))
+	resp := &http.Response{Header: http.Header{}}
+	resp.Header.Add("WWW-Authenticate", `Basic realm="legacy \"quoted\" realm"`)
+	resp.Header.Add("WWW-Authenticate", `Bearer realm="", error="insufficient_claims", claims="`+encoded+`"`)
+
+	if got := claimsChallenge(resp); got != claims {
+		t.Fatalf("claims = %q, want the Bearer challenge from the second header", got)
+	}
+}
+
 func TestClaimsChallengeRefreshesWithClaims(t *testing.T) {
 	claims := `{"access_token":{"nbf":{"essential":true,"value":"1"}}}`
 	encoded := base64.RawURLEncoding.EncodeToString([]byte(claims))

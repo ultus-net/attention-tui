@@ -226,7 +226,8 @@ func claimsChallenge(resp *http.Response) string {
 }
 
 // authParams parses a WWW-Authenticate header into its key/value pairs. It
-// understands quoted values and stops at a malformed pair rather than guessing.
+// understands quoted values, including backslash escapes, and stops at a
+// malformed pair rather than guessing.
 func authParams(header string) map[string]string {
 	out := make(map[string]string)
 	if i := strings.IndexByte(header, ' '); i >= 0 {
@@ -247,14 +248,30 @@ func authParams(header string) map[string]string {
 		var value string
 		if strings.HasPrefix(header, `"`) {
 			header = header[1:]
-			end := strings.IndexByte(header, '"')
-			if end < 0 {
-				value = header
-				header = ""
-			} else {
-				value = header[:end]
-				header = header[end+1:]
+			var b strings.Builder
+			closed := false
+			escaped := false
+			for i := 0; i < len(header); i++ {
+				switch {
+				case escaped:
+					b.WriteByte(header[i])
+					escaped = false
+				case header[i] == '\\':
+					escaped = true
+				case header[i] == '"':
+					header = header[i+1:]
+					closed = true
+				default:
+					b.WriteByte(header[i])
+				}
+				if closed {
+					break
+				}
 			}
+			if !closed {
+				header = ""
+			}
+			value = b.String()
 		} else {
 			end := strings.IndexByte(header, ',')
 			if end < 0 {
